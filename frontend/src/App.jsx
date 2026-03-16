@@ -169,12 +169,12 @@ function Btn({ children, onClick, variant = 'default', size = 'sm', loading, dis
 
 function Modal({ title, onClose, children }) {
   return (
-    <div style={{
+    <div className="px-modal-wrap" style={{
       position: 'fixed', inset: 0, zIndex: 100,
       background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center',
       padding: 16,
     }}>
-      <div style={{
+      <div className="px-modal-box" style={{
         background: 'var(--bg1)', border: '1px solid var(--border-hi)',
         borderRadius: 'var(--radius-lg)', width: '100%', maxWidth: 520,
         boxShadow: '0 24px 64px rgba(0,0,0,0.5)',
@@ -657,7 +657,7 @@ function GuestCard({ guest, hostId, onAction }) {
               {isVM ? 'VM' : 'LXC'}
             </span>
           </div>
-          <div style={{ display: 'flex', gap: 16, marginTop: 4 }}>
+          <div className="px-card-meta" style={{ display: 'flex', gap: 16, marginTop: 4 }}>
             {running && (
               <>
                 <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
@@ -673,12 +673,12 @@ function GuestCard({ guest, hostId, onAction }) {
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
+        <div className="px-card-actions" style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
           {/* Termius SSH button */}
           <a href={sshLink} title={`SSH: ${guest.sshUser || 'root'}@${sshIp}:${guest.sshPort || 22}`}
             style={{ textDecoration: 'none', display: 'inline-flex' }}>
             <Btn variant={guest.guestIp ? "blue" : "ghost"} size="xs">
-              <Terminal size={12} /> {sshLabel}
+              <Terminal size={12} /> <span className="px-ssh-label">{sshLabel}</span>
             </Btn>
           </a>
           {/* Updates — LXC only */}
@@ -977,9 +977,11 @@ function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll }
         <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 600, fontSize: 'var(--fs-sm)' }}>{nodeData.node}</span>
         <Pill status={nodeData.status} />
         <div style={{ flex: 1 }} />
+        <div className="px-node-stats" style={{ display: 'flex', gap: 12 }}>
         <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>CPU <span style={{ color: 'var(--text2)' }}>{cpuPct}%</span></span>
         <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>RAM <span style={{ color: 'var(--text2)' }}>{memPct}%</span></span>
         <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>{running}/{allGuests.length} running</span>
+        </div>
       </div>
 
       {/* Tag groups */}
@@ -1577,7 +1579,7 @@ function AdminPage({ onBack, onLogout, hosts }) {
       <style>{`@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }`}</style>
 
       {/* Nav */}
-      <header style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg1)', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
+      <header className="px-main-header" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg1)', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
         <div style={{ maxWidth: 860, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 14, height: 56 }}>
           <Btn variant="ghost" size="xs" onClick={onBack}><ChevronLeft size={14} /> Back</Btn>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -1589,7 +1591,7 @@ function AdminPage({ onBack, onLogout, hosts }) {
         </div>
       </header>
 
-      <main style={{ flex: 1, padding: '32px 24px', maxWidth: 860, margin: '0 auto', width: '100%' }}>
+      <main className="px-admin-content" style={{ flex: 1, padding: '32px 24px', maxWidth: 860, margin: '0 auto', width: '100%' }}>
 
         {msg && (
           <div style={{ marginBottom: 20, padding: '10px 14px', borderRadius: 'var(--radius)', background: msg.type === 'error' ? 'var(--red-dim)' : 'var(--green-dim)', border: `1px solid ${msgColors[msg.type || 'success']}33`, color: msgColors[msg.type || 'success'], fontSize: 'var(--fs-sm)' }}>
@@ -1772,8 +1774,8 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
       <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
 
       {/* Top nav */}
-      <header style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg1)', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
-        <div style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 16, height: 56 }}>
+      <header className="px-main-header" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg1)', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
+        <div className="px-nav-row" style={{ maxWidth: 1200, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 16, height: 56 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{ width: 30, height: 30, borderRadius: 8, background: 'var(--accent-dim2)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Activity size={16} style={{ color: 'var(--accent)' }} />
@@ -1781,7 +1783,7 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
             <span style={{ fontWeight: 700, fontSize: 'var(--fs-md)', fontFamily: 'var(--font-mono)' }}>proxmox<span style={{ color: 'var(--accent)' }}>.admin</span></span>
           </div>
 
-          <div style={{ flex: 1, maxWidth: 320, margin: '0 16px', position: 'relative' }}>
+          <div className="px-nav-search" style={{ flex: 1, maxWidth: 320, margin: '0 16px', position: 'relative' }}>
             <Search size={13} style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text3)', pointerEvents: 'none' }} />
             <input
               value={search}
@@ -1796,7 +1798,7 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
             )}
           </div>
 
-          <div style={{ display: 'flex', gap: 4, background: 'var(--bg2)', borderRadius: 'var(--radius)', padding: 3 }}>
+          <div className="px-nav-filter" style={{ display: 'flex', gap: 4, background: 'var(--bg2)', borderRadius: 'var(--radius)', padding: 3 }}>
             {['all', 'vm', 'lxc'].map(f => (
               <button key={f} onClick={() => setFilter(f)} style={{
                 padding: '4px 12px', borderRadius: 6, fontSize: 'var(--fs-xs)', fontWeight: 500,
@@ -1809,14 +1811,16 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
             ))}
           </div>
 
-          <Btn variant="accent" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Host</Btn>
-          <Btn variant="ghost" size="sm" onClick={onAdmin} title="Admin"><Settings size={14} /></Btn>
-          <Btn variant="ghost" onClick={onLogout} title="Sign out"><LogOut size={14} /></Btn>
+          <div className="px-nav-actions" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <Btn variant="accent" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Host</Btn>
+            <Btn variant="ghost" size="sm" onClick={onAdmin} title="Admin"><Settings size={14} /></Btn>
+            <Btn variant="ghost" onClick={onLogout} title="Sign out"><LogOut size={14} /></Btn>
+          </div>
         </div>
       </header>
 
       {/* Main content */}
-      <main style={{ flex: 1, padding: '28px 24px', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
+      <main className="px-main-content" style={{ flex: 1, padding: '28px 24px', maxWidth: 1200, margin: '0 auto', width: '100%' }}>
         {hosts.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '80px 0', color: 'var(--text3)' }}>
             <Server size={48} style={{ marginBottom: 16, opacity: 0.2 }} />
@@ -1836,7 +1840,7 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
 
       {/* Toast */}
       {toast && (
-        <div style={{
+        <div className="px-toast" style={{
           position: 'fixed', bottom: 24, right: 24, zIndex: 200,
           background: 'var(--bg2)', border: `1px solid ${toastColors[toast.type]}33`,
           borderLeft: `3px solid ${toastColors[toast.type]}`,
