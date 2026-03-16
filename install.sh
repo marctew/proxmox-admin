@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# Proxmox Admin Panel — install script
+# Proxmox Admin Panel — install / update script
 # Tested on Ubuntu 22.04 / 24.04
 # Usage:
-#   bash install.sh
+#   bash install.sh            — fresh install
+#   bash install.sh --update   — pull latest code and rebuild
 #   bash install.sh --dir /opt/proxmox-admin  (custom install path)
 set -e
 
 INSTALL_DIR="/opt/proxmox-admin"
 REPO_URL="https://github.com/marctew/proxmox-admin.git"
 PORT=7320
+UPDATE_ONLY=false
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 while [[ "$#" -gt 0 ]]; do
   case $1 in
+    --update) UPDATE_ONLY=true ;;
     --dir) INSTALL_DIR="$2"; shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
@@ -31,6 +34,40 @@ if [[ $EUID -ne 0 ]]; then
   error "Please run as root (sudo bash install.sh)"
 fi
 
+# ── Compose helper ────────────────────────────────────────────────────────────
+get_compose() {
+  if docker compose version &>/dev/null 2>&1; then
+    echo "docker compose"
+  else
+    echo "docker-compose"
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# UPDATE PATH
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "$UPDATE_ONLY" == true ]]; then
+  heading "Proxmox Admin Panel — Update"
+
+  [[ ! -d "$INSTALL_DIR/.git" ]] && error "No installation found at $INSTALL_DIR. Run without --update to install first."
+
+  info "Pulling latest code..."
+  git -C "$INSTALL_DIR" pull
+
+  COMPOSE=$(get_compose)
+  heading "Rebuilding containers"
+  cd "$INSTALL_DIR"
+  $COMPOSE up -d --build
+
+  heading "Update complete"
+  LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
+  echo -e "\n  ${GREEN}Updated and running at:${NC} ${YELLOW}http://${LAN_IP:-YOUR-SERVER-IP}:${PORT}${NC}\n"
+  exit 0
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FRESH INSTALL PATH
+# ══════════════════════════════════════════════════════════════════════════════
 heading "Proxmox Admin Panel Installer"
 echo "Install path : $INSTALL_DIR"
 echo "Port         : $PORT"
@@ -87,11 +124,11 @@ if ! command -v openssl &>/dev/null; then
   apt-get install -y -qq openssl
 fi
 
-# ── 2. Clone / update repo ────────────────────────────────────────────────────
+# ── 2. Clone repo ─────────────────────────────────────────────────────────────
 heading "Fetching application"
 
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  warn "Existing installation found at $INSTALL_DIR — pulling latest..."
+  warn "Existing installation found — pulling latest instead..."
   git -C "$INSTALL_DIR" pull
 else
   info "Cloning repo to $INSTALL_DIR..."
@@ -111,37 +148,27 @@ else
   info "Generated SESSION_SECRET in .env"
 fi
 
-# Ensure config dir exists
 mkdir -p "$INSTALL_DIR/config"
 
 # ── 4. Build & start ──────────────────────────────────────────────────────────
 heading "Building and starting containers"
 
-cd "$INSTALL_DIR"
-
-# Use 'docker compose' (plugin) or fall back to 'docker-compose'
-if docker compose version &>/dev/null 2>&1; then
-  COMPOSE="docker compose"
-else
-  COMPOSE="docker-compose"
-fi
-
+COMPOSE=$(get_compose)
 $COMPOSE up -d --build
 
 # ── 5. Done ───────────────────────────────────────────────────────────────────
 heading "Installation complete"
 
-# Try to detect the server's LAN IP
 LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
-if [[ -z "$LAN_IP" ]]; then
-  LAN_IP="YOUR-SERVER-IP"
-fi
 
 echo
 echo -e "  ${GREEN}Open your browser and go to:${NC}"
-echo -e "  ${YELLOW}http://${LAN_IP}:${PORT}${NC}"
+echo -e "  ${YELLOW}http://${LAN_IP:-YOUR-SERVER-IP}:${PORT}${NC}"
 echo
 echo "  Follow the setup screen to create your passphrase and scan the TOTP QR code."
+echo
+echo "  To update in future:"
+echo "    wget -qO install.sh https://raw.githubusercontent.com/marctew/proxmox-admin/main/install.sh && bash install.sh --update"
 echo
 echo "  To view logs:"
 echo "    cd $INSTALL_DIR && $COMPOSE logs -f"
