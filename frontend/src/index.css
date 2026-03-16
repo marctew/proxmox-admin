@@ -1,0 +1,88 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg0: #0d0f14;
+  --bg1: #13161d;
+  --bg2: #1a1e28;
+  --bg3: #222736;
+  --border: rgba(255,255,255,0.07);
+  --border-hi: rgba(255,255,255,0.14);
+  --text: #e8eaf0;
+  --text2: #8b90a0;
+  --text3: #555b6e;
+  --accent: #00d4aa;
+  --accent-dim: rgba(0,212,170,0.12);
+  --accent-dim2: rgba(0,212,170,0.22);
+  --blue: #4d9fff;
+  --blue-dim: rgba(77,159,255,0.12);
+  --red: #ff5555;
+  --red-dim: rgba(255,85,85,0.12);
+  --amber: #ffb347;
+  --amber-dim: rgba(255,179,71,0.12);
+  --purple: #b57bff;
+  --purple-dim: rgba(181,123,255,0.12);
+  --green: #50fa7b;
+  --green-dim: rgba(80,250,123,0.12);
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Inter', sans-serif;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --ui-font-size: 14px;
+
+  /* Proportional scale — everything scales together */
+  --fs-xs: calc(var(--ui-font-size) * 0.79);  /* ~11px @ 14 */
+  --fs-sm: calc(var(--ui-font-size) * 0.93);  /* ~13px @ 14 */
+  --fs-md: var(--ui-font-size);               /* 14px */
+  --fs-lg: calc(var(--ui-font-size) * 1.14);  /* ~16px @ 14 */
+  --fs-xl: calc(var(--ui-font-size) * 1.43);  /* ~20px @ 14 */
+}
+
+html, body, #root { height: 100%; }
+
+body {
+  background: var(--bg0);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--ui-font-size);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+
+button {
+  font-family: var(--font-sans);
+  cursor: pointer;
+  border: none;
+  outline: none;
+  font-size: var(--ui-font-size);
+}
+
+input, select {
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+
+input:focus, select:focus { border-color: var(--accent); }
+input::placeholder { color: var(--text3); }
+select option { background: var(--bg2); }
+
+label {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text2);
+  margin-bottom: 4px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}

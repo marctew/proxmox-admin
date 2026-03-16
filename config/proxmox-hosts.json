@@ -1,0 +1,14 @@
+{
+  "hosts": [
+    {
+      "id": "1773692844331",
+      "name": "ProxmoxHome",
+      "ip": "192.168.4.110",
+      "port": 8006,
+      "username": "pveadmin@pve",
+      "password": "Nikond70SS!",
+      "sshPort": 22,
+      "sshUser": "root"
+    }
+  ]
+}

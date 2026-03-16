@@ -1,0 +1,31 @@
+services:
+  backend:
+    build: ./backend
+    container_name: proxmox-admin-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # Set this to a long random string and keep it fixed.
+      # If left blank, sessions are invalidated on every container restart.
+      # Generate one with: openssl rand -hex 32
+      - SESSION_SECRET=${SESSION_SECRET:-}
+    volumes:
+      - ./config:/app/config
+    networks:
+      - proxmox-admin
+
+  frontend:
+    build: ./frontend
+    container_name: proxmox-admin-ui
+    restart: unless-stopped
+    ports:
+      - "7320:80"
+    depends_on:
+      - backend
+    networks:
+      - proxmox-admin
+
+networks:
+  proxmox-admin:
+    driver: bridge
