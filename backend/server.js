@@ -13,20 +13,23 @@ const QRCode = require('qrcode');
 const bcrypt = require('bcrypt');
 const { Client: SSHClient } = require('ssh2');
 const { WebSocketServer } = require('ws');
+const cron = require('node-cron');
 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 const PORT = process.env.PORT || 3001;
-const CONFIG_PATH = path.join('/app/config', 'proxmox-hosts.json');
-const AUTH_PATH  = path.join('/app/config', 'auth.json');
+const CONFIG_PATH      = path.join('/app/config', 'proxmox-hosts.json');
+const AUTH_PATH        = path.join('/app/config', 'auth.json');
+const SCHEDULER_PATH   = path.join('/app/config', 'scheduler.json');
+const UPDATE_CACHE_PATH = path.join('/app/config', 'update-cache.json');
 
-// ── Brute force lockout store ────────────────────────────────────────────────
-// ip -> { attempts, lockedUntil }
+// ── Brute force lockout ──────────────────────────────────────────────────────
+
 const loginAttempts = new Map();
 const MAX_ATTEMPTS = 5;
-const LOCKOUT_MS   = 15 * 60 * 1000; // 15 min
+const LOCKOUT_MS   = 15 * 60 * 1000;
 
 function checkLockout(ip) {
   const entry = loginAttempts.get(ip);
@@ -37,65 +40,42 @@ function checkLockout(ip) {
   }
   return null;
 }
-
 function recordFailure(ip) {
   const entry = loginAttempts.get(ip) || { attempts: 0, lockedUntil: null };
   entry.attempts += 1;
-  if (entry.attempts >= MAX_ATTEMPTS) {
-    entry.lockedUntil = Date.now() + LOCKOUT_MS;
-    console.log(`[auth] IP ${ip} locked out for 15 min`);
-  }
+  if (entry.attempts >= MAX_ATTEMPTS) entry.lockedUntil = Date.now() + LOCKOUT_MS;
   loginAttempts.set(ip, entry);
 }
+function clearFailures(ip) { loginAttempts.delete(ip); }
 
-function clearFailures(ip) {
-  loginAttempts.delete(ip);
-}
-
-// ── Auth config persistence ──────────────────────────────────────────────────
+// ── Auth persistence ─────────────────────────────────────────────────────────
 
 function loadAuth() {
-  try {
-    if (fs.existsSync(AUTH_PATH)) return JSON.parse(fs.readFileSync(AUTH_PATH, 'utf8'));
-  } catch {}
+  try { if (fs.existsSync(AUTH_PATH)) return JSON.parse(fs.readFileSync(AUTH_PATH, 'utf8')); } catch {}
   return { passphraseHash: null, totpSecret: null, totpVerified: false };
 }
-
 function saveAuth(auth) {
   fs.mkdirSync(path.dirname(AUTH_PATH), { recursive: true });
   fs.writeFileSync(AUTH_PATH, JSON.stringify(auth, null, 2));
 }
 
-// ── Session setup ────────────────────────────────────────────────────────────
+// ── Session ──────────────────────────────────────────────────────────────────
 
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-// Warning: if SESSION_SECRET is not set via env, it rotates on restart (all sessions invalidated)
-
 const sessionMiddleware = session({
-  secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: 'strict',
-    maxAge: 24 * 60 * 60 * 1000, // 24h
-    secure: false, // set true if serving over HTTPS
-  },
+  secret: SESSION_SECRET, resave: false, saveUninitialized: false,
+  cookie: { httpOnly: true, sameSite: 'strict', maxAge: 24 * 60 * 60 * 1000, secure: false },
   name: 'pxadmin_sid',
 });
 
-app.use(cors({ origin: false })); // lock down - no cross-origin
+app.use(cors({ origin: false }));
 app.use(express.json());
 app.use(sessionMiddleware);
-
-// ── Auth middleware ──────────────────────────────────────────────────────────
 
 function requireAuth(req, res, next) {
   if (req.session?.authenticated) return next();
   res.status(401).json({ error: 'Unauthorised' });
 }
-
-// Apply auth to all /api/* routes except /api/auth/*
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/')) return next();
   return requireAuth(req, res, next);
@@ -106,7 +86,6 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 // ── Job store ────────────────────────────────────────────────────────────────
 
 const jobs = new Map();
-
 function createJob(id, meta) {
   const job = { id, status: 'running', lines: [], exitCode: null, startedAt: Date.now(), ...meta };
   jobs.set(id, job);
@@ -114,46 +93,29 @@ function createJob(id, meta) {
   return job;
 }
 
-// ── WebSocket auth ───────────────────────────────────────────────────────────
+// ── WebSocket ────────────────────────────────────────────────────────────────
 
-// Wrap WS upgrade to check session before allowing connection
-// Single upgrade handler — noServer:true means ws won't auto-handle anything
-// We do it manually here with session auth check
 const upgrading = new WeakSet();
 server.on('upgrade', (req, socket, head) => {
   if (req.url !== '/ws') { socket.destroy(); return; }
   if (upgrading.has(socket)) return;
   upgrading.add(socket);
-
   sessionMiddleware(req, {}, () => {
-    if (!req.session?.authenticated) {
-      socket.write('HTTP/1.1 401 Unauthorised\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      upgrading.delete(socket);
-      wss.emit('connection', ws, req);
-    });
+    if (!req.session?.authenticated) { socket.write('HTTP/1.1 401 Unauthorised\r\n\r\n'); socket.destroy(); return; }
+    wss.handleUpgrade(req, socket, head, (ws) => { upgrading.delete(socket); wss.emit('connection', ws, req); });
   });
 });
 
-// ── WebSocket broadcast ──────────────────────────────────────────────────────
-
 const subscriptions = new Map();
-
 function broadcast(jobId, msg) {
   const subs = subscriptions.get(jobId);
   if (!subs) return;
   const payload = JSON.stringify(msg);
-  for (const ws of subs) {
-    if (ws.readyState === 1) ws.send(payload);
-  }
+  for (const ws of subs) { if (ws.readyState === 1) ws.send(payload); }
 }
 
 wss.on('connection', (ws) => {
   let subscribedJob = null;
-
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
@@ -162,30 +124,44 @@ wss.on('connection', (ws) => {
         if (!subscriptions.has(subscribedJob)) subscriptions.set(subscribedJob, new Set());
         subscriptions.get(subscribedJob).add(ws);
         const job = jobs.get(subscribedJob);
-        if (job) {
-          ws.send(JSON.stringify({ type: 'replay', lines: job.lines, status: job.status, exitCode: job.exitCode }));
-        }
+        if (job) ws.send(JSON.stringify({ type: 'replay', lines: job.lines, status: job.status, exitCode: job.exitCode }));
       }
     } catch {}
   });
-
-  ws.on('close', () => {
-    if (subscribedJob) subscriptions.get(subscribedJob)?.delete(ws);
-  });
+  ws.on('close', () => { if (subscribedJob) subscriptions.get(subscribedJob)?.delete(ws); });
 });
 
 // ── Config persistence ───────────────────────────────────────────────────────
 
 function loadConfig() {
-  try {
-    if (fs.existsSync(CONFIG_PATH)) return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
-  } catch {}
+  try { if (fs.existsSync(CONFIG_PATH)) return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch {}
   return { hosts: [] };
 }
-
 function saveConfig(config) {
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+// ── Scheduler config ─────────────────────────────────────────────────────────
+
+function loadScheduler() {
+  try { if (fs.existsSync(SCHEDULER_PATH)) return JSON.parse(fs.readFileSync(SCHEDULER_PATH, 'utf8')); } catch {}
+  return { enabled: false, hour: 3, minute: 0, concurrency: 1 };
+}
+function saveScheduler(s) {
+  fs.mkdirSync(path.dirname(SCHEDULER_PATH), { recursive: true });
+  fs.writeFileSync(SCHEDULER_PATH, JSON.stringify(s, null, 2));
+}
+
+// ── Update cache ─────────────────────────────────────────────────────────────
+
+function loadUpdateCache() {
+  try { if (fs.existsSync(UPDATE_CACHE_PATH)) return JSON.parse(fs.readFileSync(UPDATE_CACHE_PATH, 'utf8')); } catch {}
+  return { lastRun: null, containers: [] };
+}
+function saveUpdateCache(cache) {
+  fs.mkdirSync(path.dirname(UPDATE_CACHE_PATH), { recursive: true });
+  fs.writeFileSync(UPDATE_CACHE_PATH, JSON.stringify(cache, null, 2));
 }
 
 // ── Proxmox helpers ──────────────────────────────────────────────────────────
@@ -197,13 +173,11 @@ async function getTicket(host) {
   }), { httpsAgent, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
   return { ticket: res.data.data.ticket, csrfToken: res.data.data.CSRFPreventionToken, baseUrl };
 }
-
 async function proxmoxGet(host, endpoint) {
   const { ticket, baseUrl } = await getTicket(host);
   const res = await axios.get(`${baseUrl}${endpoint}`, { httpsAgent, headers: { Cookie: `PVEAuthCookie=${ticket}` } });
   return res.data.data;
 }
-
 async function proxmoxPost(host, endpoint, body = {}) {
   const { ticket, csrfToken, baseUrl } = await getTicket(host);
   const res = await axios.post(`${baseUrl}${endpoint}`, body, {
@@ -225,7 +199,6 @@ function sshStream(host, command, jobId, timeoutMs = 120000) {
       if (job) job.lines.push({ t: type, v: line });
       broadcast(jobId, { type, line });
     }
-
     function finish(code) {
       if (settled) return;
       settled = true;
@@ -234,14 +207,9 @@ function sshStream(host, command, jobId, timeoutMs = 120000) {
       resolve(code);
     }
 
-    // Hard timeout — kills the connection if the command never exits
-    timer = setTimeout(() => {
-      emit(`Command timed out after ${timeoutMs/1000}s`, 'error');
-      finish(1);
-    }, timeoutMs);
+    timer = setTimeout(() => { emit(`Command timed out after ${timeoutMs/1000}s`, 'error'); finish(1); }, timeoutMs);
 
     conn.on('ready', () => {
-      console.log(`[ssh] connected to ${host.ip}, running: ${command.slice(0,80)}...`);
       conn.exec(command, { pty: false }, (err, stream) => {
         if (err) { emit(`SSH exec error: ${err.message}`, 'error'); return finish(1); }
         let buf = '';
@@ -253,20 +221,137 @@ function sshStream(host, command, jobId, timeoutMs = 120000) {
         }
         stream.on('data', flush);
         stream.stderr.on('data', d => emit(d.toString().trimEnd(), 'stderr'));
-        stream.on('close', (code) => { console.log(`[ssh] stream closed, code=${code}, buf=${JSON.stringify(buf.slice(0,50))}`); if (buf) emit(buf); finish(code); });
+        stream.on('close', (code) => { if (buf) emit(buf); finish(code); });
       });
     });
-
     conn.on('error', (err) => { emit(`SSH error: ${err.message}`, 'error'); finish(1); });
     conn.connect({ host: host.ip, port: host.sshPort || 22, username: host.sshUser || 'root', password: host.password, readyTimeout: 10000 });
   });
 }
 
+// ── SSH exec (no job, returns stdout as string) ──────────────────────────────
+
+function sshExec(host, command, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    const conn = new SSHClient();
+    let settled = false;
+    let output = '';
+    let timer = setTimeout(() => { if (!settled) { settled = true; conn.end(); resolve({ output, exitCode: 1, timedOut: true }); } }, timeoutMs);
+
+    conn.on('ready', () => {
+      conn.exec(command, { pty: false }, (err, stream) => {
+        if (err) { settled = true; clearTimeout(timer); conn.end(); return resolve({ output: '', exitCode: 1 }); }
+        stream.on('data', d => { output += d.toString(); });
+        stream.stderr.on('data', d => { output += d.toString(); });
+        stream.on('close', (code) => {
+          if (settled) return;
+          settled = true; clearTimeout(timer); conn.end();
+          resolve({ output, exitCode: code });
+        });
+      });
+    });
+    conn.on('error', (err) => {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      resolve({ output: `SSH error: ${err.message}`, exitCode: 1 });
+    });
+    conn.connect({ host: host.ip, port: host.sshPort || 22, username: host.sshUser || 'root', password: host.password, readyTimeout: 10000 });
+  });
+}
+
+// ── Update check runner ──────────────────────────────────────────────────────
+
+let checkRunning = false;  // lock — prevents concurrent update checks
+let upgradeRunning = false; // lock — prevents concurrent upgrade runs
+
+const APT_CHECK_CMD = 'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null';
+
+async function runUpdateCheck() {
+  // Note: checkRunning must be set to true by caller before invoking this function
+  // This prevents async race conditions between concurrent HTTP requests
+  console.log('[scheduler] Running update check across all hosts...');
+  const config = loadConfig();
+  const results = [];
+
+  for (const host of config.hosts) {
+    try {
+      const nodes = await proxmoxGet(host, '/nodes');
+      for (const node of nodes) {
+        const lxcs = await proxmoxGet(host, `/nodes/${node.node}/lxc`).catch(() => []);
+        const running = lxcs.filter(l => l.status === 'running');
+
+        for (const lxc of running) {
+          try {
+            const cmd = `pct exec ${lxc.vmid} -- sh -c ${JSON.stringify(APT_CHECK_CMD)} </dev/null`;
+            const { output, exitCode, timedOut } = await sshExec(host, cmd, 60000);
+
+            const packages = output
+              .split('\n')
+              .filter(l => l.includes('upgradable') && !l.startsWith('Listing'))
+              .map(l => l.split('/')[0].trim())
+              .filter(Boolean);
+
+            results.push({
+              hostId: host.id,
+              hostName: host.name,
+              node: node.node,
+              vmid: lxc.vmid,
+              name: lxc.name,
+              packages,
+              packageCount: packages.length,
+              hasUpdates: packages.length > 0,
+              checkedAt: new Date().toISOString(),
+              timedOut: !!timedOut,
+            });
+
+            console.log(`[scheduler] ${host.name}/${lxc.name}: ${packages.length} updates`);
+          } catch (err) {
+            console.error(`[scheduler] Failed to check ${lxc.name}: ${err.message}`);
+            results.push({
+              hostId: host.id, hostName: host.name, node: node.node,
+              vmid: lxc.vmid, name: lxc.name,
+              packages: [], packageCount: 0, hasUpdates: false,
+              checkedAt: new Date().toISOString(), error: err.message,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[scheduler] Failed to reach host ${host.name}: ${err.message}`);
+    }
+  }
+
+  saveUpdateCache({ lastRun: new Date().toISOString(), containers: results });
+  console.log(`[scheduler] Done. ${results.filter(r => r.hasUpdates).length} containers have updates.`);
+  checkRunning = false;
+  return results;
+}
+
+// ── Cron scheduler ───────────────────────────────────────────────────────────
+
+let cronTask = null;
+
+function startCron() {
+  if (cronTask) { cronTask.stop(); cronTask = null; }
+  const sched = loadScheduler();
+  if (!sched.enabled) { console.log('[scheduler] Disabled'); return; }
+
+  const expr = `${sched.minute} ${sched.hour} * * *`;
+  console.log(`[scheduler] Starting cron: ${expr}`);
+  cronTask = cron.schedule(expr, () => {
+    if (checkRunning) { console.log('[scheduler] Cron skipped — check already running'); return; }
+    checkRunning = true;
+    runUpdateCheck().catch(err => { console.error('[scheduler] Cron error:', err.message); checkRunning = false; });
+  }, { timezone: 'UTC' });
+}
+
+// Start cron on boot
+startCron();
+
 // ════════════════════════════════════════════════════════════════════════════
 // AUTH ROUTES
 // ════════════════════════════════════════════════════════════════════════════
 
-// Status — tells the frontend what state we're in
 app.get('/api/auth/status', (req, res) => {
   const auth = loadAuth();
   res.json({
@@ -277,52 +362,37 @@ app.get('/api/auth/status', (req, res) => {
   });
 });
 
-// First-time setup — set passphrase and generate TOTP secret
 app.post('/api/auth/setup', async (req, res) => {
   const auth = loadAuth();
   if (auth.passphraseHash) return res.status(400).json({ error: 'Already configured' });
-
   const { passphrase } = req.body;
   if (!passphrase || passphrase.length < 8) return res.status(400).json({ error: 'Passphrase must be at least 8 characters' });
-
   const passphraseHash = await bcrypt.hash(passphrase, 12);
   const totpSecret = authenticator.generateSecret();
-
   saveAuth({ passphraseHash, totpSecret, totpVerified: false });
-
   const otpauth = authenticator.keyuri('admin', 'Proxmox Admin', totpSecret);
   const qrDataUrl = await QRCode.toDataURL(otpauth);
-
   res.json({ ok: true, qrDataUrl, totpSecret });
 });
 
-// Verify TOTP during setup (confirms user scanned it correctly)
 app.post('/api/auth/setup/verify-totp', (req, res) => {
   const auth = loadAuth();
   if (!auth.totpSecret) return res.status(400).json({ error: 'No TOTP secret generated' });
   if (auth.totpVerified) return res.status(400).json({ error: 'Already verified' });
-
   const { token } = req.body;
-  if (!authenticator.verify({ token, secret: auth.totpSecret })) {
+  if (!authenticator.verify({ token, secret: auth.totpSecret }))
     return res.status(401).json({ error: 'Invalid code — check your authenticator app' });
-  }
-
   saveAuth({ ...auth, totpVerified: true });
   res.json({ ok: true });
 });
 
-// Login
 app.post('/api/auth/login', async (req, res) => {
   const ip = req.ip;
   const locked = checkLockout(ip);
   if (locked) return res.status(429).json({ error: locked });
-
   const auth = loadAuth();
   if (!auth.passphraseHash) return res.status(400).json({ error: 'Not configured yet' });
-
   const { passphrase, totpToken } = req.body;
-
-  // Check passphrase
   const ok = await bcrypt.compare(passphrase, auth.passphraseHash);
   if (!ok) {
     recordFailure(ip);
@@ -330,8 +400,6 @@ app.post('/api/auth/login', async (req, res) => {
     const remaining = MAX_ATTEMPTS - (entry?.attempts || 0);
     return res.status(401).json({ error: `Wrong passphrase. ${remaining > 0 ? `${remaining} attempt${remaining !== 1 ? 's' : ''} remaining.` : 'Account locked.'}` });
   }
-
-  // Check TOTP
   if (auth.totpVerified) {
     if (!totpToken) return res.status(401).json({ error: 'TOTP code required', needsTotp: true });
     if (!authenticator.verify({ token: totpToken, secret: auth.totpSecret })) {
@@ -339,20 +407,14 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ error: 'Invalid TOTP code', needsTotp: true });
     }
   }
-
   clearFailures(ip);
   req.session.authenticated = true;
   req.session.loginTime = Date.now();
   res.json({ ok: true });
 });
 
-// Logout
-app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ ok: true });
-});
+app.post('/api/auth/logout', (req, res) => { req.session.destroy(); res.json({ ok: true }); });
 
-// Reset TOTP — clears secret, forces re-setup on next login
 app.post('/api/auth/reset-totp', (req, res) => {
   if (!req.session?.authenticated) return res.status(401).json({ error: 'Unauthorised' });
   const auth = loadAuth();
@@ -361,7 +423,6 @@ app.post('/api/auth/reset-totp', (req, res) => {
   res.json({ ok: true });
 });
 
-// Change passphrase (requires current passphrase + TOTP)
 app.post('/api/auth/change-passphrase', async (req, res) => {
   if (!req.session?.authenticated) return res.status(401).json({ error: 'Unauthorised' });
   const auth = loadAuth();
@@ -374,7 +435,183 @@ app.post('/api/auth/change-passphrase', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// PROXMOX API ROUTES (all protected by requireAuth middleware above)
+// SCHEDULER ROUTES
+// ════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/scheduler', (req, res) => {
+  res.json(loadScheduler());
+});
+
+app.post('/api/scheduler', (req, res) => {
+  const { enabled, hour, minute, concurrency } = req.body;
+  const sched = {
+    enabled: !!enabled,
+    hour: Math.max(0, Math.min(23, parseInt(hour) || 3)),
+    minute: Math.max(0, Math.min(59, parseInt(minute) || 0)),
+    concurrency: ['1','3','5','unlimited'].includes(String(concurrency)) ? concurrency : 1,
+  };
+  saveScheduler(sched);
+  startCron(); // restart with new settings
+  res.json({ ok: true, ...sched });
+});
+
+// Manual trigger — runs check now
+app.post('/api/scheduler/run-now', (req, res) => {
+  if (checkRunning) {
+    return res.status(409).json({ ok: false, busy: true, message: 'Check already in progress' });
+  }
+  if (upgradeRunning) {
+    return res.status(409).json({ ok: false, busy: true, message: 'Cannot check while upgrade is running' });
+  }
+  checkRunning = true;
+  res.json({ ok: true, message: 'Update check started' });
+  runUpdateCheck().catch(err => {
+    console.error('[scheduler] Manual run error:', err.message);
+    checkRunning = false;
+  });
+});
+
+// Check status — lets frontend poll whether a check is running
+app.get('/api/scheduler/status', (req, res) => {
+  res.json({ running: checkRunning, upgrading: upgradeRunning });
+});
+
+// Get cached update results
+app.get('/api/updates', (req, res) => {
+  res.json(loadUpdateCache());
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// UPDATE-ALL ROUTE
+// Runs apt-upgrade sequentially or with concurrency limit
+// Streams progress via a single broadcast job
+// ════════════════════════════════════════════════════════════════════════════
+
+app.post('/api/updates/run-all', (req, res) => {
+  if (upgradeRunning) {
+    return res.status(409).json({ ok: false, busy: true, message: 'Upgrade already in progress' });
+  }
+  if (checkRunning) {
+    return res.status(409).json({ ok: false, busy: true, message: 'Cannot upgrade while check is running' });
+  }
+  const { vmids } = req.body;
+  if (!Array.isArray(vmids) || vmids.length === 0)
+    return res.status(400).json({ error: 'No containers specified' });
+
+  upgradeRunning = true; // set synchronously before any await
+
+  const sched = loadScheduler();
+  const concurrency = sched.concurrency === 'unlimited' ? vmids.length : parseInt(sched.concurrency) || 1;
+
+  const jobId = `update-all-${Date.now()}`;
+  const job = createJob(jobId, { command: 'update-all', total: vmids.length, done: 0 });
+  res.json({ ok: true, jobId });
+
+  const config = loadConfig();
+  const APT_UPGRADE_CMD = 'DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1';
+
+  function emitGlobal(line, type = 'line') {
+    job.lines.push({ t: type, v: line });
+    broadcast(jobId, { type, line });
+  }
+
+  async function upgradeOne(item) {
+    const host = config.hosts.find(h => h.id === item.hostId);
+    if (!host) { emitGlobal(`[${item.name}] Host not found`, 'error'); return; }
+
+    emitGlobal(`\n── ${item.name} (${item.hostId}/${item.vmid}) ──`, 'line');
+    const cmd = `pct exec ${item.vmid} -- sh -c ${JSON.stringify(APT_UPGRADE_CMD)} </dev/null`;
+
+    // Create a sub-job for individual streaming, pipe to master job too
+    const subJobId = `${jobId}-${item.vmid}`;
+    const subJob = createJob(subJobId, { command: 'apt-upgrade', vmid: item.vmid });
+
+    // Wrap sshStream to also emit to master job
+    const origBroadcast = broadcast;
+    const { output, exitCode } = await new Promise((resolve) => {
+      const conn = new SSHClient();
+      let settled = false;
+      let output = '';
+      const timer = setTimeout(() => {
+        if (settled) return; settled = true;
+        emitGlobal(`[${item.name}] Timed out`, 'error');
+        conn.end(); resolve({ output, exitCode: 1 });
+      }, 5 * 60 * 1000);
+
+      conn.on('ready', () => {
+        conn.exec(cmd, { pty: false }, (err, stream) => {
+          if (err) {
+            emitGlobal(`[${item.name}] SSH exec error: ${err.message}`, 'error');
+            if (!settled) { settled = true; clearTimeout(timer); conn.end(); resolve({ output, exitCode: 1 }); }
+            return;
+          }
+          let buf = '';
+          function flush(data) {
+            buf += data.toString();
+            output += data.toString();
+            const parts = buf.split('\n');
+            buf = parts.pop();
+            for (const line of parts) {
+              subJob.lines.push({ t: 'line', v: line });
+              broadcast(subJobId, { type: 'line', line });
+              emitGlobal(`  ${line}`);
+            }
+          }
+          stream.on('data', flush);
+          stream.stderr.on('data', d => {
+            const line = d.toString().trimEnd();
+            subJob.lines.push({ t: 'stderr', v: line });
+            broadcast(subJobId, { type: 'stderr', line });
+            emitGlobal(`  ${line}`, 'stderr');
+          });
+          stream.on('close', (code) => {
+            if (buf) { emitGlobal(`  ${buf}`); }
+            if (settled) return; settled = true; clearTimeout(timer); conn.end();
+            subJob.status = 'done'; subJob.exitCode = code;
+            broadcast(subJobId, { type: 'done', exitCode: code });
+            resolve({ output, exitCode: code });
+          });
+        });
+      });
+      conn.on('error', (err) => {
+        if (settled) return; settled = true; clearTimeout(timer);
+        emitGlobal(`[${item.name}] SSH error: ${err.message}`, 'error');
+        resolve({ output, exitCode: 1 });
+      });
+      conn.connect({ host: host.ip, port: host.sshPort || 22, username: host.sshUser || 'root', password: host.password, readyTimeout: 10000 });
+    });
+
+    job.done = (job.done || 0) + 1;
+    emitGlobal(`── ${item.name} done (exit ${exitCode}) [${job.done}/${vmids.length}] ──`);
+  }
+
+  // Run with concurrency limit
+  (async () => {
+    emitGlobal(`Starting upgrade of ${vmids.length} container${vmids.length !== 1 ? 's' : ''} (concurrency: ${concurrency})`);
+    const queue = [...vmids];
+    async function worker() {
+      while (queue.length > 0) {
+        const item = queue.shift();
+        if (item) await upgradeOne(item);
+      }
+    }
+    const workers = Array.from({ length: Math.min(concurrency, vmids.length) }, worker);
+    await Promise.all(workers);
+    emitGlobal(`\n✓ All updates complete`);
+    job.status = 'done'; job.exitCode = 0;
+    broadcast(jobId, { type: 'done', exitCode: 0 });
+    upgradeRunning = false;
+
+    // Re-run check to refresh update cache
+    if (!checkRunning) {
+      checkRunning = true;
+      await runUpdateCheck();
+    }
+  })();
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROXMOX ROUTES
 // ════════════════════════════════════════════════════════════════════════════
 
 app.get('/api/hosts', (req, res) => {
@@ -410,15 +647,10 @@ app.post('/api/hosts/:id/test', async (req, res) => {
   } catch (err) { res.status(502).json({ error: err.message }); }
 });
 
-// Pick best IP — handles both LXC (/interfaces) and VM (guest agent) response shapes
-// LXC shape:  [{ name, hwaddr, inet: '192.168.1.x/24', inet6: '...' }, ...]
-// VM shape:   [{ name, 'ip-addresses': [{ 'ip-address': '...', 'ip-address-type': 'ipv4' }] }, ...]
 function pickGuestIp(ifaces) {
   if (!ifaces) return null;
   const candidates = [];
-
   for (const iface of ifaces) {
-    // VM guest agent format
     if (iface['ip-addresses']) {
       for (const addr of iface['ip-addresses']) {
         const ip = addr['ip-address'];
@@ -427,14 +659,11 @@ function pickGuestIp(ifaces) {
         candidates.push(ip);
       }
     }
-    // LXC format — inet is like '192.168.1.100/24'
     if (iface.inet) {
       const ip = iface.inet.split('/')[0];
       if (!ip.startsWith('127.') && !ip.startsWith('169.254.')) candidates.push(ip);
     }
   }
-
-  // Prefer RFC1918 private ranges
   const priv = candidates.find(ip =>
     ip.startsWith('10.') || ip.startsWith('192.168.') ||
     (ip.startsWith('172.') && parseInt(ip.split('.')[1]) >= 16 && parseInt(ip.split('.')[1]) <= 31)
@@ -449,13 +678,10 @@ async function fetchGuestIp(host, nodeName, type, vmid, status) {
       const ifaces = await proxmoxGet(host, `/nodes/${nodeName}/lxc/${vmid}/interfaces`);
       return pickGuestIp(ifaces);
     } else {
-      // VM — needs qemu-guest-agent
       const data = await proxmoxGet(host, `/nodes/${nodeName}/qemu/${vmid}/agent/network-get-interfaces`);
       return pickGuestIp(data?.result || []);
     }
-  } catch {
-    return null; // guest agent not installed or guest stopped
-  }
+  } catch { return null; }
 }
 
 app.get('/api/hosts/:id/scan', async (req, res) => {
@@ -470,24 +696,11 @@ app.get('/api/hosts/:id/scan', async (req, res) => {
         proxmoxGet(host, `/nodes/${node.node}/lxc`).catch(() => []),
         proxmoxGet(host, `/nodes/${node.node}/status`).catch(() => ({})),
       ]);
-
-      // Fetch IPs in parallel for all guests
-      const enriched = async (items, type) => {
-        return Promise.all(items.map(async item => {
-          const guestIp = await fetchGuestIp(host, node.node, type, item.vmid, item.status);
-          return {
-            ...item, type, node: node.node, hostId: host.id, hostName: host.name,
-            hostIp: host.ip, sshUser: host.sshUser || 'root', sshPort: host.sshPort || 22,
-            guestIp, // null if unavailable
-          };
-        }));
-      };
-
-      return {
-        node: node.node, status: node.status, nodeStatus,
-        vms: await enriched(vms, 'vm'),
-        lxcs: await enriched(lxcs, 'lxc'),
-      };
+      const enriched = async (items, type) => Promise.all(items.map(async item => {
+        const guestIp = await fetchGuestIp(host, node.node, type, item.vmid, item.status);
+        return { ...item, type, node: node.node, hostId: host.id, hostName: host.name, hostIp: host.ip, sshUser: host.sshUser || 'root', sshPort: host.sshPort || 22, guestIp };
+      }));
+      return { node: node.node, status: node.status, nodeStatus, vms: await enriched(vms, 'vm'), lxcs: await enriched(lxcs, 'lxc') };
     }));
     res.json({ ok: true, nodes: results });
   } catch (err) { res.status(502).json({ error: err.message }); }
@@ -512,94 +725,60 @@ app.post('/api/hosts/:id/exec', async (req, res) => {
   const config = loadConfig();
   const host = config.hosts.find(h => h.id === req.params.id);
   if (!host) return res.status(404).json({ error: 'Host not found' });
-
   const allowed = ['apt-check', 'apt-upgrade', 'apt-autoremove', 'enable-root-ssh'];
   if (!allowed.includes(command)) return res.status(400).json({ error: 'Command not permitted' });
-
   const cmds = {
-    'apt-check':        'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null',
-    'apt-upgrade':      'DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1',
-    'apt-autoremove':   'DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1',
-    'enable-root-ssh':  'sed -i \'s/^#*\s*PermitRootLogin.*/PermitRootLogin yes/\' /etc/ssh/sshd_config && grep -q \'PermitRootLogin yes\' /etc/ssh/sshd_config || echo \'PermitRootLogin yes\' >> /etc/ssh/sshd_config && (systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || systemctl restart sshd 2>/dev/null) && echo \'Done — root SSH enabled\'',
+    'apt-check':       'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null',
+    'apt-upgrade':     'DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1',
+    'apt-autoremove':  'DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1',
+    'enable-root-ssh': 'sed -i \'s/^#*\s*PermitRootLogin.*/PermitRootLogin yes/\' /etc/ssh/sshd_config && grep -q \'PermitRootLogin yes\' /etc/ssh/sshd_config || echo \'PermitRootLogin yes\' >> /etc/ssh/sshd_config && (systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || systemctl restart sshd 2>/dev/null) && echo \'Done — root SSH enabled\'',
   };
-
   const jobId = `${Date.now()}-${vmid}-${command}`;
   const job = createJob(jobId, { command, vmid, node });
   res.json({ ok: true, jobId });
-
   const pctCmd = `pct exec ${vmid} -- sh -c ${JSON.stringify(cmds[command])}`;
   sshStream(host, pctCmd, jobId).then((exitCode) => {
-    job.status = 'done';
-    job.exitCode = exitCode;
+    job.status = 'done'; job.exitCode = exitCode;
     broadcast(jobId, { type: 'done', exitCode });
   });
 });
 
-
-// Port scan — runs ss -tlnp inside the guest
-// LXC: SSH to host + pct exec
-// VM:  QEMU guest agent exec API
 app.post('/api/hosts/:id/portscan', async (req, res) => {
   const { node, vmid, type } = req.body;
   const config = loadConfig();
   const host = config.hosts.find(h => h.id === req.params.id);
   if (!host) return res.status(404).json({ error: 'Host not found' });
-
   const jobId = `${Date.now()}-${vmid}-portscan`;
   const job = createJob(jobId, { command: 'port-scan', vmid, node });
   res.json({ ok: true, jobId });
-
   const SS_CMD = 'timeout 10 ss -tlnp 2>&1 || timeout 10 netstat -tlnp 2>&1 || echo "ss/netstat not available"';
-
   if (type === 'lxc') {
-    // </dev/null redirects stdin at the pct level, not inside the container shell
     const pctCmd = `pct exec ${vmid} -- sh -c ${JSON.stringify(SS_CMD)} </dev/null`;
-    console.log(`[portscan] LXC ${vmid} — SSH to ${host.ip}, cmd: ${pctCmd}`);
     sshStream(host, pctCmd, jobId, 15000).then(exitCode => {
-      console.log(`[portscan] LXC ${vmid} done, exit=${exitCode}, lines=${job.lines.length}`);
       job.status = 'done'; job.exitCode = exitCode;
       broadcast(jobId, { type: 'done', exitCode });
     });
   } else {
-    // VM: QEMU guest agent exec, then poll for output
     (async () => {
-      function emit(line, t = 'line') {
-        job.lines.push({ t, v: line });
-        broadcast(jobId, { type: t, line });
-      }
+      function emit(line, t = 'line') { job.lines.push({ t, v: line }); broadcast(jobId, { type: t, line }); }
       try {
         const { ticket, csrfToken, baseUrl } = await getTicket(host);
         const authHdr = { Cookie: `PVEAuthCookie=${ticket}`, CSRFPreventionToken: csrfToken };
         const readHdr = { Cookie: `PVEAuthCookie=${ticket}` };
-
-        // Start agent exec
-        const execRes = await axios.post(
-          `${baseUrl}/nodes/${node}/qemu/${vmid}/agent/exec`,
-          { command: ['sh', '-c', SS_CMD] },
-          { httpsAgent, headers: authHdr }
-        );
+        const execRes = await axios.post(`${baseUrl}/nodes/${node}/qemu/${vmid}/agent/exec`, { command: ['sh', '-c', SS_CMD] }, { httpsAgent, headers: authHdr });
         const pid = execRes.data.data.pid;
-
-        // Poll for completion (max 30s)
         const start = Date.now();
         let out = null;
         while (Date.now() - start < 30000) {
           await new Promise(r => setTimeout(r, 1000));
-          const statusRes = await axios.get(
-            `${baseUrl}/nodes/${node}/qemu/${vmid}/agent/exec-status?pid=${pid}`,
-            { httpsAgent, headers: readHdr }
-          );
+          const statusRes = await axios.get(`${baseUrl}/nodes/${node}/qemu/${vmid}/agent/exec-status?pid=${pid}`, { httpsAgent, headers: readHdr });
           const s = statusRes.data.data;
           if (s.exited) { out = s['out-data'] || ''; break; }
         }
-
-        if (out === null) { emit('Timed out waiting for guest agent', 'error'); }
-        else {
-          for (const line of out.split('\n')) emit(line);
-        }
+        if (out === null) emit('Timed out waiting for guest agent', 'error');
+        else { for (const line of out.split('\n')) emit(line); }
       } catch (err) {
-        const detail = err.response?.data?.message || err.message;
-        emit(`Guest agent error: ${detail} — is qemu-guest-agent installed and running?`, 'error');
+        emit(`Guest agent error: ${err.response?.data?.message || err.message}`, 'error');
       }
       job.status = 'done'; job.exitCode = 0;
       broadcast(jobId, { type: 'done', exitCode: 0 });

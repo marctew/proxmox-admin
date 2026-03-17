@@ -4,7 +4,8 @@ import {
   Square, Play, ChevronDown, ChevronRight, Cpu, MemoryStick, HardDrive,
   Wifi, WifiOff, AlertCircle, CheckCircle, Clock, Settings, X, Eye,
   EyeOff, Zap, Monitor, Box, Activity, ExternalLink, Loader, Search, Tag, LogOut,
-  Shield, Palette, Wrench, ChevronLeft, Save, Key, RefreshCw as Reset
+  Shield, Palette, Wrench, ChevronLeft, Save, Key, RefreshCw as Reset,
+  PackageCheck, Calendar, Timer, ListChecks, PlayCircle, SkipForward
 } from 'lucide-react'
 
 // ── API helpers ──────────────────────────────────────────────────────────────
@@ -612,7 +613,7 @@ function PortsModal({ guest, hostId, onClose }) {
 
 // ── VM / LXC Card ────────────────────────────────────────────────────────────
 
-function GuestCard({ guest, hostId, onAction }) {
+function GuestCard({ guest, hostId, onAction, checkRunning }) {
   const [expanded, setExpanded] = useState(false)
   const [actionLoading, setActionLoading] = useState(null)
   const [showUpdates, setShowUpdates] = useState(false)
@@ -852,7 +853,7 @@ function tagColour(tag) {
 
 // ── Tag Group ────────────────────────────────────────────────────────────────
 
-function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll }) {
+function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, checkRunning }) {
   const [collapsed, setCollapsed] = useState(true)
 
   // Sync with external collapse/expand all — only when prop changes
@@ -960,7 +961,7 @@ function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll }) {
             </div>
           )}
           {visibleGuests.map(g => (
-            <GuestCard key={`${g.type}-${g.vmid}`} guest={g} hostId={hostId} onAction={onAction} />
+            <GuestCard key={`${g.type}-${g.vmid}`} guest={g} hostId={hostId} onAction={onAction} checkRunning={checkRunning} />
           ))}
         </div>
       )}
@@ -970,7 +971,7 @@ function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll }) {
 
 // ── Node section ──────────────────────────────────────────────────────────────
 
-function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll }) {
+function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, checkRunning }) {
   const ns = nodeData.nodeStatus || {}
   const cpuPct = ns.cpu ? Math.round(ns.cpu * 100) : 0
   const memPct = pct(ns.memory?.used, ns.memory?.total)
@@ -1017,6 +1018,7 @@ function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll }
             onAction={onAction}
             hideHeader={singleUntaggedGroup}
             collapseAll={collapseAll}
+            checkRunning={checkRunning}
           />
         ))}
       </div>
@@ -1028,7 +1030,7 @@ function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll }
 
 const REFRESH_INTERVAL = 30000
 
-function HostPanel({ host, onDelete, onAction, filter, search }) {
+function HostPanel({ host, onDelete, onAction, filter, search, checkRunning }) {
   // Load cached scan data immediately so cards show on mount
   const cached = loadScanCache(host.id)
   const [scanData, setScanData] = useState(cached?.nodes || null)
@@ -1149,7 +1151,7 @@ function HostPanel({ host, onDelete, onAction, filter, search }) {
       )}
 
       {scanData && scanData.map(node => (
-        <NodeSection key={node.node} nodeData={node} hostId={host.id} onAction={onAction} filter={filter} search={search} collapseAll={collapseAll} />
+        <NodeSection key={node.node} nodeData={node} hostId={host.id} onAction={onAction} filter={filter} search={search} collapseAll={collapseAll} checkRunning={checkRunning} />
       ))}
     </div>
   )
@@ -1535,6 +1537,51 @@ function AdminPage({ onBack, onLogout, hosts }) {
   const [sshLoading, setSshLoading] = useState(false)
   const [sshOutput, setSshOutput] = useState('')
 
+  // Scheduler state
+  const [sched, setSched] = useState({ enabled: false, hour: 3, minute: 0, concurrency: 1 })
+  const [schedLoading, setSchedLoading] = useState(false)
+  const [schedSaved, setSchedSaved] = useState(false)
+  const [checkRunning, setCheckRunning] = useState(false)
+  const checkPollRef = useRef(null)
+
+  useEffect(() => {
+    api.get('/api/scheduler').then(res => setSched(res))
+    // Poll status every 5s so button stays disabled across all windows
+    const syncStatus = () => api.get('/api/scheduler/status').then(res => setCheckRunning(res.running))
+    syncStatus()
+    const statusPoll = setInterval(syncStatus, 5000)
+    return () => { clearInterval(checkPollRef.current); clearInterval(statusPoll) }
+  }, [])
+
+  async function triggerCheckNow() {
+    // Always ask the server — it's the single source of truth across all windows
+    const res = await api.post('/api/scheduler/run-now')
+    if (res.busy) {
+      flash('A check is already in progress', 'error')
+      setCheckRunning(true) // sync local state
+      return
+    }
+    setCheckRunning(true)
+    flash('Update check started — results will appear on the Updates page')
+    clearInterval(checkPollRef.current)
+    checkPollRef.current = setInterval(async () => {
+      const status = await api.get('/api/scheduler/status')
+      if (!status.running) {
+        clearInterval(checkPollRef.current)
+        setCheckRunning(false)
+        flash('Update check complete')
+      }
+    }, 3000)
+  }
+
+  async function saveScheduler() {
+    setSchedLoading(true)
+    const res = await api.post('/api/scheduler', sched)
+    setSchedLoading(false)
+    if (res.ok) { setSchedSaved(true); setTimeout(() => setSchedSaved(false), 3000); flash('Scheduler saved') }
+    else flash(res.error || 'Failed', 'error')
+  }
+
   function flash(text, type = 'success') {
     setMsg({ text, type })
     setTimeout(() => setMsg(null), 4000)
@@ -1737,6 +1784,366 @@ function AdminPage({ onBack, onLogout, hosts }) {
             )}
           </div>
         </AdminSection>
+
+        {/* ── Scheduler ── */}
+        <AdminSection title="Update Scheduler" icon={<Calendar size={16} />}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', background: 'var(--bg2)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)', marginBottom: 16 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 'var(--fs-sm)', marginBottom: 4 }}>Automatic update checks</div>
+              <p style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
+                Runs apt-get update and checks all LXC containers for pending upgrades daily at the specified time (UTC).
+              </p>
+            </div>
+            <button
+              onClick={() => setSched(s => ({ ...s, enabled: !s.enabled }))}
+              style={{
+                width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                background: sched.enabled ? 'var(--accent)' : 'var(--bg3)',
+                position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+              }}
+            >
+              <span style={{
+                position: 'absolute', top: 3, left: sched.enabled ? 22 : 3,
+                width: 18, height: 18, borderRadius: '50%', background: 'white',
+                transition: 'left 0.2s',
+              }} />
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16, opacity: sched.enabled ? 1 : 0.4, pointerEvents: sched.enabled ? 'auto' : 'none' }}>
+            <div>
+              <label>Run at (UTC hour)</label>
+              <select value={sched.hour} onChange={e => setSched(s => ({ ...s, hour: parseInt(e.target.value) }))}>
+                {Array.from({ length: 24 }, (_, i) => (
+                  <option key={i} value={i}>{String(i).padStart(2, '0')}:00</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label>Concurrency (Update All)</label>
+              <select value={sched.concurrency} onChange={e => setSched(s => ({ ...s, concurrency: e.target.value }))}>
+                <option value="1">1 at a time (safest)</option>
+                <option value="3">3 at a time</option>
+                <option value="5">5 at a time</option>
+                <option value="unlimited">All at once (fastest)</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+            <Btn variant="accent" size="sm" onClick={saveScheduler} loading={schedLoading}>
+              <Save size={13} /> Save
+            </Btn>
+            {schedSaved && <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--green)' }}>✓ Saved</span>}
+            <div style={{ flex: 1 }} />
+            <Btn variant="ghost" size="sm" onClick={triggerCheckNow} loading={checkRunning} disabled={checkRunning}>
+              <RefreshCw size={13} style={{ animation: checkRunning ? 'spin 1s linear infinite' : 'none' }} />
+              {checkRunning ? 'Running...' : 'Run Check Now'}
+            </Btn>
+          </div>
+        </AdminSection>
+
+      </main>
+    </div>
+  )
+}
+
+
+// ── Updates Page ──────────────────────────────────────────────────────────────
+
+function UpdatesPage({ onBack, onLogout }) {
+  const [cache, setCache] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [runAllJobId, setRunAllJobId] = useState(null)
+  const [runAllLines, setRunAllLines] = useState([])
+  const [runAllStatus, setRunAllStatus] = useState(null)
+  const [selected, setSelected] = useState(new Set())
+  const [checkingNow, setCheckingNow] = useState(false)
+  const [upgradingNow, setUpgradingNow] = useState(false)
+  const outputRef = useRef(null)
+  const wsRef = useRef(null)
+
+  async function loadCache() {
+    setLoading(true)
+    const res = await api.get('/api/updates')
+    setCache(res)
+    setLoading(false)
+  }
+
+  async function checkNow() {
+    const trigger = await api.post('/api/scheduler/run-now')
+    if (trigger.busy) {
+      // Already running in another window — just show spinner and wait
+      setCheckingNow(true)
+    } else {
+      setCheckingNow(true)
+    }
+    // Either way, poll until server says it's done
+    const poll = setInterval(async () => {
+      const status = await api.get('/api/scheduler/status')
+      if (!status.running) {
+        clearInterval(poll)
+        const res = await api.get('/api/updates')
+        setCache(res)
+        setCheckingNow(false)
+      }
+    }, 3000)
+  }
+
+  function toggleSelect(key) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  function selectAll() {
+    const withUpdates = (cache?.containers || []).filter(c => c.hasUpdates)
+    setSelected(new Set(withUpdates.map(c => `${c.hostId}:${c.vmid}`)))
+  }
+
+  function selectNone() { setSelected(new Set()) }
+
+  async function runUpdates() {
+    const withUpdates = (cache?.containers || []).filter(c => c.hasUpdates)
+    const targets = withUpdates.filter(c => selected.has(`${c.hostId}:${c.vmid}`))
+    if (!targets.length) return
+
+    const vmids = targets.map(c => ({ hostId: c.hostId, node: c.node, vmid: c.vmid, name: c.name }))
+    const res = await api.post('/api/updates/run-all', { vmids })
+    if (res.busy) { alert('An upgrade is already running'); return }
+    if (!res.ok) return
+    setUpgradingNow(true)
+
+    setRunAllJobId(res.jobId)
+    setRunAllLines([])
+    setRunAllStatus('running')
+
+    const ws = new WebSocket(`ws://${window.location.host}/ws`)
+    wsRef.current = ws
+    ws.onopen = () => ws.send(JSON.stringify({ subscribe: res.jobId }))
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data)
+      if (msg.type === 'replay') {
+        setRunAllLines(msg.lines.map(l => l.v))
+      } else if (msg.type === 'line' || msg.type === 'stderr') {
+        setRunAllLines(prev => [...prev, msg.line])
+      } else if (msg.type === 'done') {
+        setRunAllStatus('done')
+        ws.close()
+        // Reload cache after done
+        setTimeout(loadCache, 2000)
+      }
+    }
+  }
+
+  useEffect(() => {
+    loadCache()
+    // Poll status every 5s — keeps spinner and button in sync across all windows
+    const syncStatus = async () => {
+      const status = await api.get('/api/scheduler/status')
+      if (!status.running && checkingNow) loadCache()
+      setCheckingNow(status.running)
+      setUpgradingNow(status.upgrading)
+    }
+    syncStatus()
+    const statusPoll = setInterval(syncStatus, 5000)
+    return () => { wsRef.current?.close(); clearInterval(statusPoll) }
+  }, [])
+
+  useEffect(() => {
+    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight
+  }, [runAllLines])
+
+  const withUpdates = (cache?.containers || []).filter(c => c.hasUpdates)
+  const upToDate = (cache?.containers || []).filter(c => !c.hasUpdates && !c.error)
+  const errors = (cache?.containers || []).filter(c => c.error)
+
+  // Group by host
+  const byHost = {}
+  for (const c of withUpdates) {
+    if (!byHost[c.hostName]) byHost[c.hostName] = []
+    byHost[c.hostName].push(c)
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
+      <style>{`@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }`}</style>
+
+      <header className="px-main-header" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg1)', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
+        <div style={{ maxWidth: 1000, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 14, height: 56 }}>
+          <Btn variant="ghost" size="xs" onClick={onBack}><ChevronLeft size={14} /> Back</Btn>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <PackageCheck size={15} style={{ color: 'var(--accent)' }} />
+            <span style={{ fontWeight: 600, fontSize: 'var(--fs-md)' }}>Pending Updates</span>
+          </div>
+          {cache?.lastRun && (
+            <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>
+              Last checked: {new Date(cache.lastRun).toLocaleString()}
+            </span>
+          )}
+          <div style={{ flex: 1 }} />
+          <Btn variant="ghost" size="xs" onClick={checkNow} loading={checkingNow}>
+            <RefreshCw size={12} style={{ animation: checkingNow ? 'spin 1s linear infinite' : 'none' }} />
+            {checkingNow ? 'Checking...' : 'Check Now'}
+          </Btn>
+          <Btn variant="ghost" size="xs" onClick={onLogout}><LogOut size={13} /></Btn>
+        </div>
+      </header>
+
+      <main className="px-main-content" style={{ flex: 1, padding: '24px', maxWidth: 1000, margin: '0 auto', width: '100%' }}>
+
+        {loading && (
+          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text3)' }}>
+            <Loader size={28} style={{ animation: 'spin 1s linear infinite', marginBottom: 12 }} />
+            <p>Loading update cache...</p>
+          </div>
+        )}
+
+        {!loading && !cache?.lastRun && (
+          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text3)' }}>
+            <Calendar size={48} style={{ marginBottom: 16, opacity: 0.2 }} />
+            <h2 style={{ fontSize: 'var(--fs-xl)', fontWeight: 600, color: 'var(--text2)', marginBottom: 8 }}>No check run yet</h2>
+            <p style={{ marginBottom: 24 }}>Configure the scheduler in Admin, or run a check now.</p>
+            <p style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>Note: update checks run on LXC containers only.</p>
+            <Btn variant="accent" size="md" onClick={checkNow} loading={checkingNow}>
+              <RefreshCw size={14} /> Run Check Now
+            </Btn>
+          </div>
+        )}
+
+        {!loading && cache?.lastRun && (
+          <>
+            {/* Summary bar */}
+            <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
+              <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: withUpdates.length > 0 ? 'var(--amber-dim)' : 'var(--green-dim)', border: `1px solid ${withUpdates.length > 0 ? 'rgba(255,179,71,0.3)' : 'rgba(80,250,123,0.3)'}`, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <PackageCheck size={16} style={{ color: withUpdates.length > 0 ? 'var(--amber)' : 'var(--green)' }} />
+                <span style={{ fontWeight: 600, color: withUpdates.length > 0 ? 'var(--amber)' : 'var(--green)' }}>
+                  {withUpdates.length} container{withUpdates.length !== 1 ? 's' : ''} need updates
+                </span>
+              </div>
+              <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: 'var(--bg2)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <CheckCircle size={16} style={{ color: 'var(--green)' }} />
+                <span style={{ color: 'var(--text2)' }}>{upToDate.length} up to date</span>
+              </div>
+              <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: 'var(--bg2)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>LXC containers only</span>
+            </div>
+          {errors.length > 0 && (
+                <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: 'var(--red-dim)', border: '1px solid rgba(255,85,85,0.3)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <AlertCircle size={16} style={{ color: 'var(--red)' }} />
+                  <span style={{ color: 'var(--red)' }}>{errors.length} error{errors.length !== 1 ? 's' : ''}</span>
+                </div>
+              )}
+            </div>
+
+            {withUpdates.length > 0 && (
+              <>
+                {/* Bulk action bar */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, padding: '10px 14px', background: 'var(--bg2)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
+                    {selected.size} of {withUpdates.length} selected
+                  </span>
+                  <Btn size="xs" variant="ghost" onClick={selectAll}>Select all</Btn>
+                  <Btn size="xs" variant="ghost" onClick={selectNone}>None</Btn>
+                  <div style={{ flex: 1 }} />
+                  <Btn
+                    variant="accent" size="sm"
+                    onClick={runUpdates}
+                    disabled={selected.size === 0 || runAllStatus === 'running' || upgradingNow || checkingNow}
+                    loading={runAllStatus === 'running' || upgradingNow}
+                  >
+                    <Zap size={13} /> {checkingNow ? 'Check running...' : `Update ${selected.size > 0 ? selected.size : ''} selected`}
+                  </Btn>
+                </div>
+
+                {/* Containers grouped by host */}
+                {Object.entries(byHost).map(([hostName, containers]) => (
+                  <div key={hostName} style={{ marginBottom: 24 }}>
+                    <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      {hostName}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {containers.map(c => {
+                        const key = `${c.hostId}:${c.vmid}`
+                        const isSelected = selected.has(key)
+                        return (
+                          <div
+                            key={key}
+                            onClick={() => toggleSelect(key)}
+                            style={{
+                              padding: '12px 16px', borderRadius: 'var(--radius-lg)', cursor: 'pointer',
+                              background: isSelected ? 'var(--accent-dim)' : 'var(--bg1)',
+                              border: `1px solid ${isSelected ? 'var(--accent)' : 'rgba(255,179,71,0.2)'}`,
+                              display: 'flex', alignItems: 'center', gap: 12, transition: 'all 0.15s',
+                            }}
+                          >
+                            <div style={{
+                              width: 18, height: 18, borderRadius: 4, border: `2px solid ${isSelected ? 'var(--accent)' : 'var(--border-hi)'}`,
+                              background: isSelected ? 'var(--accent)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                            }}>
+                              {isSelected && <CheckCircle size={12} style={{ color: 'var(--bg0)' }} />}
+                            </div>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontWeight: 600, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)' }}>{c.name}</div>
+                              <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>#{c.vmid} · {c.node}</div>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, justifyContent: 'flex-end', maxWidth: '60%' }}>
+                              {c.packages.slice(0, 8).map(pkg => (
+                                <span key={pkg} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', padding: '2px 6px', background: 'var(--amber-dim)', borderRadius: 4, color: 'var(--amber)' }}>
+                                  {pkg}
+                                </span>
+                              ))}
+                              {c.packages.length > 8 && (
+                                <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', padding: '2px 6px' }}>+{c.packages.length - 8} more</span>
+                              )}
+                            </div>
+                            <span style={{ fontSize: 'var(--fs-xs)', fontWeight: 700, color: 'var(--amber)', flexShrink: 0 }}>
+                              {c.packageCount} pkg{c.packageCount !== 1 ? 's' : ''}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Output terminal */}
+                {runAllJobId && (
+                  <div style={{ marginTop: 24 }}>
+                    <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                      Update output {runAllStatus === 'running' ? '— running...' : '— done'}
+                    </div>
+                    <div
+                      ref={outputRef}
+                      style={{
+                        background: 'var(--bg0)', borderRadius: 'var(--radius)', border: '1px solid var(--border)',
+                        padding: 12, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)',
+                        height: 300, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.7,
+                      }}
+                    >
+                      {runAllLines.map((line, i) => <div key={i} style={{ color: 'var(--text2)' }}>{line}</div>)}
+                      {runAllStatus === 'running' && (
+                        <span style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                          <Loader size={10} style={{ animation: 'spin 1s linear infinite' }} /> running
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {withUpdates.length === 0 && !loading && (
+              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text3)' }}>
+                <CheckCircle size={48} style={{ marginBottom: 16, color: 'var(--green)', opacity: 0.5 }} />
+                <h2 style={{ fontSize: 'var(--fs-xl)', fontWeight: 600, color: 'var(--text2)', marginBottom: 8 }}>All up to date</h2>
+                <p>No containers have pending updates.</p>
+              </div>
+            )}
+          </>
+        )}
+
       </main>
     </div>
   )
@@ -1751,26 +2158,39 @@ export default function Root() {
 }
 
 function Router({ onLogout }) {
-  const [page, setPage] = useState(window.location.hash === '#/admin' ? 'admin' : 'main')
+  const getInitialPage = () => {
+    if (window.location.hash === '#/admin') return 'admin'
+    if (window.location.hash === '#/updates') return 'updates'
+    return 'main'
+  }
+  const [page, setPage] = useState(getInitialPage)
   const [hosts, setHosts] = useState([])
+  const [updateCount, setUpdateCount] = useState(0)
 
   useEffect(() => { applyTheme(loadSettings()) }, [])
   useEffect(() => {
     api.get('/api/hosts').then(res => { if (Array.isArray(res)) setHosts(res) })
+    // Load update count badge
+    api.get('/api/updates').then(res => {
+      if (res.containers) setUpdateCount(res.containers.filter(c => c.hasUpdates).length)
+    })
   }, [])
 
-  function goAdmin() { window.location.hash = '#/admin'; setPage('admin') }
-  function goMain()  { window.location.hash = '#/';       setPage('main') }
+  function goAdmin()   { window.location.hash = '#/admin';   setPage('admin') }
+  function goUpdates() { window.location.hash = '#/updates'; setPage('updates') }
+  function goMain()    { window.location.hash = '#/';        setPage('main') }
 
-  if (page === 'admin') return <AdminPage onBack={goMain} onLogout={onLogout} hosts={hosts} />
-  return <App onLogout={onLogout} onAdmin={goAdmin} hosts={hosts} setHosts={setHosts} />
+  if (page === 'admin')   return <AdminPage onBack={goMain} onLogout={onLogout} hosts={hosts} />
+  if (page === 'updates') return <UpdatesPage onBack={goMain} onLogout={onLogout} />
+  return <App onLogout={onLogout} onAdmin={goAdmin} onUpdates={goUpdates} updateCount={updateCount} hosts={hosts} setHosts={setHosts} />
 }
 
-function App({ onLogout, onAdmin, hosts, setHosts }) {
+function App({ onLogout, onAdmin, onUpdates, updateCount, hosts, setHosts }) {
   const [showAdd, setShowAdd] = useState(false)
   const [toast, setToast] = useState(null)
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
+  const [checkRunning, setCheckRunning] = useState(false)
   const toastRef = useRef()
 
   function showToast(msg, type = 'info') {
@@ -1796,7 +2216,13 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
     else showToast(res.error || 'Action failed', 'error')
   }
 
-  useEffect(() => { loadHosts() }, [])
+  useEffect(() => {
+    loadHosts()
+    const syncStatus = () => api.get('/api/scheduler/status').then(res => setCheckRunning(res.running))
+    syncStatus()
+    const poll = setInterval(syncStatus, 5000)
+    return () => clearInterval(poll)
+  }, [])
 
   const toastColors = { success: 'var(--green)', error: 'var(--red)', warn: 'var(--amber)', info: 'var(--accent)' }
 
@@ -1845,6 +2271,21 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
 
           <div className="px-nav-actions" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <Btn variant="accent" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Host</Btn>
+            <div style={{ position: 'relative', display: 'inline-flex' }}>
+              <Btn variant="ghost" size="sm" onClick={onUpdates} title="Pending updates">
+                <PackageCheck size={14} />
+              </Btn>
+              {updateCount > 0 && (
+                <span style={{
+                  position: 'absolute', top: -4, right: -4,
+                  background: 'var(--amber)', color: 'var(--bg0)',
+                  borderRadius: '50%', width: 16, height: 16,
+                  fontSize: 10, fontWeight: 700,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  pointerEvents: 'none',
+                }}>{updateCount > 9 ? '9+' : updateCount}</span>
+              )}
+            </div>
             <Btn variant="ghost" size="sm" onClick={onAdmin} title="Admin"><Settings size={14} /></Btn>
             <Btn variant="ghost" onClick={onLogout} title="Sign out"><LogOut size={14} /></Btn>
           </div>
@@ -1862,7 +2303,7 @@ function App({ onLogout, onAdmin, hosts, setHosts }) {
           </div>
         ) : (
           hosts.map(host => (
-            <HostPanel key={host.id} host={host} onDelete={deleteHost} onAction={doAction} filter={filter} search={search} />
+            <HostPanel key={host.id} host={host} onDelete={deleteHost} onAction={doAction} filter={filter} search={search} checkRunning={checkRunning} />
           ))
         )}
       </main>
