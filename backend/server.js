@@ -263,6 +263,7 @@ function sshExec(host, command, timeoutMs = 60000) {
 
 let checkRunning = false;  // lock — prevents concurrent update checks
 let upgradeRunning = false; // lock — prevents concurrent upgrade runs
+let checkProgress = { current: 0, total: 0, currentName: '' };
 
 const APT_CHECK_CMD = 'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null';
 
@@ -273,6 +274,19 @@ async function runUpdateCheck() {
   const config = loadConfig();
   const results = [];
 
+  // Pre-count total running LXCs for progress tracking
+  let totalLxcs = 0;
+  try {
+    for (const host of config.hosts) {
+      const nodes = await proxmoxGet(host, '/nodes').catch(() => []);
+      for (const node of nodes) {
+        const lxcs = await proxmoxGet(host, `/nodes/${node.node}/lxc`).catch(() => []);
+        totalLxcs += lxcs.filter(l => l.status === 'running').length;
+      }
+    }
+  } catch {}
+  checkProgress = { current: 0, total: totalLxcs, currentName: '' };
+
   for (const host of config.hosts) {
     try {
       const nodes = await proxmoxGet(host, '/nodes');
@@ -281,6 +295,8 @@ async function runUpdateCheck() {
         const running = lxcs.filter(l => l.status === 'running');
 
         for (const lxc of running) {
+          checkProgress.current += 1;
+          checkProgress.currentName = lxc.name;
           try {
             const cmd = `pct exec ${lxc.vmid} -- sh -c ${JSON.stringify(APT_CHECK_CMD)} </dev/null`;
             const { output, exitCode, timedOut } = await sshExec(host, cmd, 60000);
@@ -323,6 +339,7 @@ async function runUpdateCheck() {
 
   saveUpdateCache({ lastRun: new Date().toISOString(), containers: results });
   console.log(`[scheduler] Done. ${results.filter(r => r.hasUpdates).length} containers have updates.`);
+  checkProgress = { current: 0, total: 0, currentName: '' };
   checkRunning = false;
   return results;
 }
@@ -473,7 +490,11 @@ app.post('/api/scheduler/run-now', (req, res) => {
 
 // Check status — lets frontend poll whether a check is running
 app.get('/api/scheduler/status', (req, res) => {
-  res.json({ running: checkRunning, upgrading: upgradeRunning });
+  res.json({
+    running: checkRunning,
+    upgrading: upgradeRunning,
+    progress: checkProgress,
+  });
 });
 
 // Get cached update results

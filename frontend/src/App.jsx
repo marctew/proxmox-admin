@@ -1858,6 +1858,7 @@ function UpdatesPage({ onBack, onLogout }) {
   const [selected, setSelected] = useState(new Set())
   const [checkingNow, setCheckingNow] = useState(false)
   const [upgradingNow, setUpgradingNow] = useState(false)
+  const [checkProgress, setCheckProgress] = useState({ current: 0, total: 0, currentName: '' })
   const outputRef = useRef(null)
   const wsRef = useRef(null)
 
@@ -1945,6 +1946,7 @@ function UpdatesPage({ onBack, onLogout }) {
       if (!status.running && checkingNow) loadCache()
       setCheckingNow(status.running)
       setUpgradingNow(status.upgrading)
+      if (status.progress) setCheckProgress(status.progress)
     }
     syncStatus()
     const statusPoll = setInterval(syncStatus, 5000)
@@ -1983,9 +1985,11 @@ function UpdatesPage({ onBack, onLogout }) {
             </span>
           )}
           <div style={{ flex: 1 }} />
-          <Btn variant="ghost" size="xs" onClick={checkNow} loading={checkingNow}>
+          <Btn variant="ghost" size="xs" onClick={checkNow} loading={checkingNow} disabled={checkingNow || upgradingNow}>
             <RefreshCw size={12} style={{ animation: checkingNow ? 'spin 1s linear infinite' : 'none' }} />
-            {checkingNow ? 'Checking...' : 'Check Now'}
+            {checkingNow && checkProgress.total > 0
+              ? `${checkProgress.current}/${checkProgress.total}`
+              : checkingNow ? 'Checking...' : 'Check Now'}
           </Btn>
           <Btn variant="ghost" size="xs" onClick={onLogout}><LogOut size={13} /></Btn>
         </div>
@@ -2006,8 +2010,9 @@ function UpdatesPage({ onBack, onLogout }) {
             <h2 style={{ fontSize: 'var(--fs-xl)', fontWeight: 600, color: 'var(--text2)', marginBottom: 8 }}>No check run yet</h2>
             <p style={{ marginBottom: 24 }}>Configure the scheduler in Admin, or run a check now.</p>
             <p style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>Note: update checks run on LXC containers only.</p>
-            <Btn variant="accent" size="md" onClick={checkNow} loading={checkingNow}>
-              <RefreshCw size={14} /> Run Check Now
+            <Btn variant="accent" size="md" onClick={checkNow} loading={checkingNow} disabled={checkingNow || upgradingNow}>
+              <RefreshCw size={14} />
+              {checkingNow && checkProgress.total > 0 ? `Checking ${checkProgress.current}/${checkProgress.total}...` : 'Run Check Now'}
             </Btn>
           </div>
         )}
