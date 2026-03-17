@@ -1104,15 +1104,18 @@ function HostPanel({ host, onDelete, onAction, filter, search }) {
           )}
         </div>
 
-        {/* Row 2 — action toolbar */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px 10px', borderTop: '1px solid var(--border)', flexWrap: 'nowrap', overflowX: 'auto' }}>
+        {/* Row 2 — collapse/expand */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px', borderTop: '1px solid var(--border)' }}>
           <Btn size="xs" variant="ghost" onClick={() => triggerCollapse(false)} title="Expand all groups">
             <ChevronDown size={12} /> Expand all
           </Btn>
           <Btn size="xs" variant="ghost" onClick={() => triggerCollapse(true)} title="Collapse all groups">
             <ChevronRight size={12} /> Collapse all
           </Btn>
-          <div style={{ flex: 1 }} />
+        </div>
+
+        {/* Row 3 — scan / test / delete */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 14px 10px', borderTop: '1px solid var(--border)' }}>
           <Btn size="xs" variant="ghost" onClick={testConn} loading={testing} title="Test connection">
             <Wifi size={12} /> Test
           </Btn>
@@ -1121,6 +1124,7 @@ function HostPanel({ host, onDelete, onAction, filter, search }) {
               {lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </span>
           )}
+          <div style={{ flex: 1 }} />
           <Btn size="xs" variant="accent" onClick={() => scan(false)} loading={scanning}>
             <RefreshCw size={12} style={{ animation: scanning ? 'spin 1s linear infinite' : 'none' }} /> Scan
           </Btn>
