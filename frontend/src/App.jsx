@@ -167,7 +167,7 @@ function Btn({ children, onClick, variant = 'default', size = 'sm', loading, dis
   )
 }
 
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, footer }) {
   return (
     <div className="px-modal-wrap" style={{
       position: 'fixed', inset: 0, zIndex: 100,
@@ -178,12 +178,22 @@ function Modal({ title, onClose, children }) {
         background: 'var(--bg1)', border: '1px solid var(--border-hi)',
         borderRadius: 'var(--radius-lg)', width: '100%', maxWidth: 520,
         boxShadow: '0 24px 64px rgba(0,0,0,0.5)',
+        display: 'flex', flexDirection: 'column',
+        maxHeight: 'calc(100vh - 48px)',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border)' }}>
+        {/* Title bar — always visible */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '16px 20px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
           <span style={{ fontWeight: 600, fontSize: 'var(--fs-md)' }}>{title}</span>
           <Btn variant="ghost" size="xs" onClick={onClose}><X size={16} /></Btn>
         </div>
-        <div style={{ padding: 20 }}>{children}</div>
+        {/* Scrollable body */}
+        <div style={{ padding: 20, overflowY: 'auto', flex: 1 }}>{children}</div>
+        {/* Optional sticky footer */}
+        {footer && (
+          <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', flexShrink: 0 }}>
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -367,7 +377,23 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
   const lineColor = { line: 'var(--text2)', stderr: 'var(--amber)', error: 'var(--red)' }
 
   return (
-    <Modal title={`Updates — ${guest.name || guest.vmid}`} onClose={() => onClose(exec.status === 'done')}>
+    <Modal title={`Updates — ${guest.name || guest.vmid}`} onClose={() => onClose(exec.status === 'done')}
+      footer={
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <Btn variant="ghost" size="xs" onClick={() => startCommand('apt-check')} disabled={busy}>
+            <RefreshCw size={12} /> Refresh
+          </Btn>
+          {upgradable.length > 0 && exec.status === 'done' && (
+            <Btn variant="accent" size="xs" onClick={() => startCommand('apt-upgrade')} disabled={busy}>
+              <Zap size={12} /> Upgrade All
+            </Btn>
+          )}
+          <Btn variant="ghost" size="xs" onClick={() => startCommand('apt-autoremove')} disabled={busy}>
+            <Trash2 size={12} /> Autoremove
+          </Btn>
+        </div>
+      }
+    >
       {exec.status === 'done' && (
         <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
           {upgradable.length > 0 ? (
@@ -419,19 +445,6 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
         )}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginTop: 14, justifyContent: 'flex-end' }}>
-        <Btn variant="ghost" size="xs" onClick={() => startCommand('apt-check')} disabled={busy}>
-          <RefreshCw size={12} /> Refresh
-        </Btn>
-        {upgradable.length > 0 && exec.status === 'done' && (
-          <Btn variant="accent" size="xs" onClick={() => startCommand('apt-upgrade')} disabled={busy}>
-            <Zap size={12} /> Upgrade All
-          </Btn>
-        )}
-        <Btn variant="ghost" size="xs" onClick={() => startCommand('apt-autoremove')} disabled={busy}>
-          <Trash2 size={12} /> Autoremove
-        </Btn>
-      </div>
     </Modal>
   )
 }
@@ -632,9 +645,10 @@ function GuestCard({ guest, hostId, onAction }) {
       overflow: 'hidden',
       transition: 'border-color 0.2s',
     }}>
-      {/* Header */}
+
+      {/* Row 1 — icon + name + status (clickable to expand) */}
       <div
-        style={{ padding: '12px 16px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}
+        style={{ padding: '12px 16px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}
         onClick={() => setExpanded(e => !e)}
       >
         <div style={{
@@ -647,17 +661,17 @@ function GuestCard({ guest, hostId, onAction }) {
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <span style={{ fontWeight: 600, fontSize: 'var(--fs-md)', fontFamily: 'var(--font-mono)' }}>
               {guest.name || `${isVM ? 'vm' : 'ct'}-${guest.vmid}`}
             </span>
             <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>#{guest.vmid}</span>
             <Pill status={guest.status} />
-            <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', background: isVM ? 'var(--blue-dim)' : 'var(--purple-dim)', padding: '2px 7px', borderRadius: 10, color: isVM ? 'var(--blue)' : 'var(--purple)' }}>
+            <span style={{ fontSize: 'var(--fs-xs)', background: isVM ? 'var(--blue-dim)' : 'var(--purple-dim)', padding: '2px 7px', borderRadius: 10, color: isVM ? 'var(--blue)' : 'var(--purple)' }}>
               {isVM ? 'VM' : 'LXC'}
             </span>
           </div>
-          <div className="px-card-meta" style={{ display: 'flex', gap: 16, marginTop: 4 }}>
+          <div style={{ display: 'flex', gap: 12, marginTop: 4, flexWrap: 'wrap' }}>
             {running && (
               <>
                 <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
@@ -673,48 +687,56 @@ function GuestCard({ guest, hostId, onAction }) {
           </div>
         </div>
 
-        <div className="px-card-actions" style={{ display: 'flex', gap: 6, alignItems: 'center' }} onClick={e => e.stopPropagation()}>
-          {/* Termius SSH button */}
-          <a href={sshLink} title={`SSH: ${guest.sshUser || 'root'}@${sshIp}:${guest.sshPort || 22}`}
-            style={{ textDecoration: 'none', display: 'inline-flex' }}>
-            <Btn variant={guest.guestIp ? "blue" : "ghost"} size="xs">
-              <Terminal size={12} /> <span className="px-ssh-label">{sshLabel}</span>
-            </Btn>
-          </a>
-          {/* Updates — LXC only */}
-          {!isVM && (
-            <Btn variant={activeJobId ? "accent" : "ghost"} size="xs" onClick={() => setShowUpdates(true)} title="Check for apt updates">
-              <RefreshCw size={12} style={{ animation: activeJobId ? 'spin 1.5s linear infinite' : 'none' }} />
-              {activeJobId ? 'Running...' : 'Updates'}
-            </Btn>
-          )}
-          {/* Ports — all guest types */}
-          <Btn variant="ghost" size="xs" onClick={() => setShowPorts(true)} title="Scan open ports">
-            <Wifi size={12} /> Ports
+        {/* Expand chevron — far right */}
+        <span style={{ color: 'var(--text3)', display: 'flex', flexShrink: 0 }}>
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </span>
+      </div>
+
+      {/* Row 2 — action buttons toolbar */}
+      <div
+        style={{ padding: '6px 12px 10px', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', borderTop: '1px solid var(--border)' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* SSH */}
+        <a href={sshLink} title={`SSH: ${guest.sshUser || 'root'}@${sshIp}:${guest.sshPort || 22}`}
+          style={{ textDecoration: 'none', display: 'inline-flex' }}>
+          <Btn variant={guest.guestIp ? "blue" : "ghost"} size="xs">
+            <Terminal size={12} /> {sshLabel}
           </Btn>
+        </a>
+        {/* Updates — LXC only */}
+        {!isVM && (
+          <Btn variant={activeJobId ? "accent" : "ghost"} size="xs" onClick={() => setShowUpdates(true)} title="Check for apt updates">
+            <RefreshCw size={12} style={{ animation: activeJobId ? 'spin 1.5s linear infinite' : 'none' }} />
+            {activeJobId ? 'Running...' : 'Updates'}
+          </Btn>
+        )}
+        {/* Ports */}
+        <Btn variant="ghost" size="xs" onClick={() => setShowPorts(true)} title="Scan open ports">
+          <Wifi size={12} /> Ports
+        </Btn>
 
-          {running ? (
-            <>
-              <Btn variant="ghost" size="xs" onClick={() => doAction('reboot')} loading={actionLoading === 'reboot'} title="Reboot">
-                <RotateCcwIcon size={12} />
-              </Btn>
-              <Btn variant="ghost" size="xs" onClick={() => doAction('shutdown')} loading={actionLoading === 'shutdown'} title="Shutdown">
-                <Power size={12} />
-              </Btn>
-              <Btn variant="danger" size="xs" onClick={() => doAction('stop')} loading={actionLoading === 'stop'} title="Force stop">
-                <Square size={12} />
-              </Btn>
-            </>
-          ) : (
-            <Btn variant="accent" size="xs" onClick={() => doAction('start')} loading={actionLoading === 'start'} title="Start">
-              <Play size={12} />
+        <div style={{ flex: 1 }} />
+
+        {/* Power actions — pushed to the right */}
+        {running ? (
+          <>
+            <Btn variant="ghost" size="xs" onClick={() => doAction('reboot')} loading={actionLoading === 'reboot'} title="Reboot">
+              <RotateCcwIcon size={12} />
             </Btn>
-          )}
-
-          <span style={{ color: 'var(--text3)', display: 'flex' }}>
-            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </span>
-        </div>
+            <Btn variant="ghost" size="xs" onClick={() => doAction('shutdown')} loading={actionLoading === 'shutdown'} title="Shutdown">
+              <Power size={12} />
+            </Btn>
+            <Btn variant="danger" size="xs" onClick={() => doAction('stop')} loading={actionLoading === 'stop'} title="Force stop">
+              <Square size={12} />
+            </Btn>
+          </>
+        ) : (
+          <Btn variant="accent" size="xs" onClick={() => doAction('start')} loading={actionLoading === 'start'} title="Start">
+            <Play size={12} />
+          </Btn>
+        )}
       </div>
 
       {/* Updates modal */}
@@ -1057,29 +1079,40 @@ function HostPanel({ host, onDelete, onAction, filter, search }) {
   return (
     <div style={{ marginBottom: 32 }}>
       {/* Host header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16, padding: '14px 18px', background: 'var(--bg2)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-hi)' }}>
-        <div style={{ width: 10, height: 10, borderRadius: '50%', background: testResult?.ok ? 'var(--green)' : testResult?.error ? 'var(--red)' : 'var(--text3)', flexShrink: 0 }} />
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 'var(--fs-lg)' }}>{host.name}</div>
-          <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>
-            {host.ip}:{host.port}
-            {testResult?.version && <span style={{ color: 'var(--accent)', marginLeft: 8 }}>PVE {testResult.version}</span>}
+      <div style={{ marginBottom: 16, background: 'var(--bg2)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-hi)', overflow: 'hidden' }}>
+
+        {/* Row 1 — host identity + stats */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '14px 18px' }}>
+          <div style={{ width: 10, height: 10, borderRadius: '50%', background: testResult?.ok ? 'var(--green)' : testResult?.error ? 'var(--red)' : 'var(--text3)', flexShrink: 0 }} />
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 'var(--fs-lg)' }}>{host.name}</div>
+            <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>
+              {host.ip}:{host.port}
+              {testResult?.version && <span style={{ color: 'var(--accent)', marginLeft: 8 }}>PVE {testResult.version}</span>}
+            </div>
           </div>
+          <div style={{ flex: 1 }} />
+          {scanData && (
+            <div style={{ display: 'flex', gap: 16 }}>
+              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
+                <span style={{ color: 'var(--text)', fontWeight: 600 }}>{runningGuests}</span>/{totalGuests} running
+              </span>
+              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
+                <span style={{ color: 'var(--text)', fontWeight: 600 }}>{scanData.length}</span> node{scanData.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+          )}
         </div>
-        <div style={{ flex: 1 }} />
 
-        {scanData && (
-          <div style={{ display: 'flex', gap: 16, marginRight: 8 }}>
-            <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
-              <span style={{ color: 'var(--text)', fontWeight: 600 }}>{runningGuests}</span>/{totalGuests} running
-            </span>
-            <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
-              <span style={{ color: 'var(--text)', fontWeight: 600 }}>{scanData.length}</span> node{scanData.length !== 1 ? 's' : ''}
-            </span>
-          </div>
-        )}
-
-        <div style={{ display: 'flex', gap: 8 }}>
+        {/* Row 2 — action toolbar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 14px 10px', borderTop: '1px solid var(--border)', flexWrap: 'nowrap', overflowX: 'auto' }}>
+          <Btn size="xs" variant="ghost" onClick={() => triggerCollapse(false)} title="Expand all groups">
+            <ChevronDown size={12} /> Expand all
+          </Btn>
+          <Btn size="xs" variant="ghost" onClick={() => triggerCollapse(true)} title="Collapse all groups">
+            <ChevronRight size={12} /> Collapse all
+          </Btn>
+          <div style={{ flex: 1 }} />
           <Btn size="xs" variant="ghost" onClick={testConn} loading={testing} title="Test connection">
             <Wifi size={12} /> Test
           </Btn>
@@ -1088,12 +1121,6 @@ function HostPanel({ host, onDelete, onAction, filter, search }) {
               {lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </span>
           )}
-          <Btn size="xs" variant="ghost" onClick={() => triggerCollapse(false)} title="Expand all groups">
-            <ChevronDown size={12} />
-          </Btn>
-          <Btn size="xs" variant="ghost" onClick={() => triggerCollapse(true)} title="Collapse all groups">
-            <ChevronRight size={12} />
-          </Btn>
           <Btn size="xs" variant="accent" onClick={() => scan(false)} loading={scanning}>
             <RefreshCw size={12} style={{ animation: scanning ? 'spin 1s linear infinite' : 'none' }} /> Scan
           </Btn>
@@ -1101,6 +1128,7 @@ function HostPanel({ host, onDelete, onAction, filter, search }) {
             <Trash2 size={12} />
           </Btn>
         </div>
+
       </div>
 
       {scanErr && (

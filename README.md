@@ -19,6 +19,12 @@ wget -qO install.sh https://raw.githubusercontent.com/marctew/proxmox-admin/main
 
 Then open `http://YOUR-SERVER-IP:7320` and follow the setup screen.
 
+## Update
+
+```bash
+wget -qO install.sh https://raw.githubusercontent.com/marctew/proxmox-admin/main/install.sh && bash install.sh --update
+```
+
 ## Reset 2FA
 
 ```bash
