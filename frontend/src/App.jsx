@@ -1940,16 +1940,19 @@ function UpdatesPage({ onBack, onLogout }) {
 
   useEffect(() => {
     loadCache()
-    // Poll status every 5s — keeps spinner and button in sync across all windows
+    // Use ref to avoid stale closure on checkingNow inside interval
+    const wasRunningRef = { current: false }
     const syncStatus = async () => {
       const status = await api.get('/api/scheduler/status')
-      if (!status.running && checkingNow) loadCache()
+      // If just finished, reload cache
+      if (!status.running && wasRunningRef.current) loadCache()
+      wasRunningRef.current = status.running
       setCheckingNow(status.running)
-      setUpgradingNow(status.upgrading)
+      setUpgradingNow(!!status.upgrading)
       if (status.progress) setCheckProgress(status.progress)
     }
     syncStatus()
-    const statusPoll = setInterval(syncStatus, 5000)
+    const statusPoll = setInterval(syncStatus, 2000)
     return () => { wsRef.current?.close(); clearInterval(statusPoll) }
   }, [])
 
