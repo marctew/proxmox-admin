@@ -51,26 +51,15 @@ if [[ "$UPDATE_ONLY" == true ]]; then
 
   [[ ! -d "$INSTALL_DIR/.git" ]] && error "No installation found at $INSTALL_DIR. Run without --update to install first."
 
-  # Check if package.json changed before pulling — if so, we need --no-cache
-  BEFORE_PKG=$(git -C "$INSTALL_DIR" show HEAD:backend/package.json 2>/dev/null || echo "")
-
   info "Pulling latest code..."
   git -C "$INSTALL_DIR" pull
-
-  AFTER_PKG=$(cat "$INSTALL_DIR/backend/package.json" 2>/dev/null || echo "")
 
   COMPOSE=$(get_compose)
   cd "$INSTALL_DIR"
 
-  if [[ "$BEFORE_PKG" != "$AFTER_PKG" ]]; then
-    warn "backend/package.json changed — rebuilding without cache to pick up new dependencies..."
-    heading "Rebuilding containers (no cache)"
-    $COMPOSE build --no-cache
-    $COMPOSE up -d
-  else
-    heading "Rebuilding containers"
-    $COMPOSE up -d --build
-  fi
+  heading "Rebuilding containers (no cache)"
+  $COMPOSE build --no-cache
+  $COMPOSE up -d
 
   heading "Update complete"
   LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
