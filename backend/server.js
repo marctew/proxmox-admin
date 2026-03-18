@@ -283,6 +283,7 @@ let upgradeRunning = false; // lock — prevents concurrent upgrade runs
 let checkProgress = { current: 0, total: 0, currentName: '' };
 let checkCancelled = false; // set to true to abort in-flight check
 const activeCheckConns = new Set(); // SSH connections for current check — killed on cancel
+let currentCheckTrigger = 'scheduled'; // 'scheduled' or 'manual'
 
 const APT_CHECK_CMD = 'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null';
 
@@ -373,6 +374,8 @@ async function runUpdateCheck() {
       cancelled: false,
     });
     console.log(`[scheduler] Done. ${withUpdates} containers have updates.`);
+    // Push to Home Assistant
+    pushHaSensors(results, currentCheckTrigger || 'scheduled').catch(err => console.error('[ha] Push error:', err.message));
   } else {
     appendHistory({
       startedAt: new Date(startedAt).toISOString(),
@@ -406,6 +409,7 @@ function startCron() {
   cronTask = cron.schedule(expr, () => {
     if (checkRunning) { console.log('[scheduler] Cron skipped — check already running'); return; }
     checkRunning = true;
+    currentCheckTrigger = 'scheduled';
     runUpdateCheck().catch(err => { console.error('[scheduler] Cron error:', err.message); checkRunning = false; });
   }, { timezone: 'UTC' });
 }
@@ -531,6 +535,7 @@ app.post('/api/scheduler/run-now', (req, res) => {
     return res.status(409).json({ ok: false, busy: true, message: 'Cannot check while upgrade is running' });
   }
   checkRunning = true;
+  currentCheckTrigger = 'manual';
   res.json({ ok: true, message: 'Update check started' });
   runUpdateCheck().catch(err => {
     console.error('[scheduler] Manual run error:', err.message);
@@ -884,3 +889,160 @@ app.get('/api/jobs/:jobId', (req, res) => {
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 server.listen(PORT, () => console.log(`Proxmox Admin running on :${PORT}`));
+
+// ════════════════════════════════════════════════════════════════════════════
+// HOME ASSISTANT INTEGRATION
+// ════════════════════════════════════════════════════════════════════════════
+
+const HA_CONFIG_PATH = path.join('/app/config', 'ha-config.json');
+
+function loadHaConfig() {
+  try { if (fs.existsSync(HA_CONFIG_PATH)) return JSON.parse(fs.readFileSync(HA_CONFIG_PATH, 'utf8')); } catch {}
+  return null;
+}
+
+function saveHaConfig(cfg) {
+  fs.mkdirSync(path.dirname(HA_CONFIG_PATH), { recursive: true });
+  fs.writeFileSync(HA_CONFIG_PATH, JSON.stringify(cfg, null, 2));
+}
+
+function sanitiseHostname(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+
+async function pushHaSensors(checkResults, trigger = 'manual') {
+  const cfg = loadHaConfig();
+  if (!cfg?.url || !cfg?.token) return;
+
+  const base = cfg.url.replace(/\/$/, '');
+  const headers = {
+    'Authorization': `Bearer ${cfg.token}`,
+    'Content-Type': 'application/json',
+  };
+
+  const now = new Date().toISOString();
+  const cache = loadUpdateCache();
+  const containers = cache.containers || [];
+
+  // Group by host
+  const byHost = {};
+  for (const c of containers) {
+    if (!byHost[c.hostName]) byHost[c.hostName] = [];
+    byHost[c.hostName].push(c);
+  }
+
+  const pushState = async (entityId, state, attributes = {}) => {
+    try {
+      await axios.post(`${base}/api/states/${entityId}`, { state, attributes }, { headers, timeout: 10000 });
+    } catch (err) {
+      console.error(`[ha] Failed to push ${entityId}: ${err.message}`);
+    }
+  };
+
+  // Per-host sensors
+  for (const [hostName, hostContainers] of Object.entries(byHost)) {
+    const slug = sanitiseHostname(hostName);
+    const withUpdates = hostContainers.filter(c => c.hasUpdates).length;
+    const checked = hostContainers.length;
+
+    await pushState(
+      `sensor.proxmoxadminpanel_${slug}_containers_with_updates`,
+      withUpdates,
+      { friendly_name: `Proxmox Admin (${hostName}) — Updates Pending`, unit_of_measurement: 'containers', icon: 'mdi:package-up' }
+    );
+    await pushState(
+      `sensor.proxmoxadminpanel_${slug}_containers_checked`,
+      checked,
+      { friendly_name: `Proxmox Admin (${hostName}) — Containers Checked`, unit_of_measurement: 'containers', icon: 'mdi:server' }
+    );
+    await pushState(
+      `sensor.proxmoxadminpanel_${slug}_last_check`,
+      cache.lastRun || now,
+      { friendly_name: `Proxmox Admin (${hostName}) — Last Check`, device_class: 'timestamp', icon: 'mdi:clock-check' }
+    );
+  }
+
+  // Global rollup sensors
+  const totalWithUpdates = containers.filter(c => c.hasUpdates).length;
+  const totalChecked = containers.length;
+  const history = loadHistory();
+  const lastRun = history[0] || {};
+  const outcome = lastRun.cancelled ? 'cancelled' : lastRun.errors > 0 ? 'errors' : 'ok';
+  const durationSecs = lastRun.durationMs ? Math.round(lastRun.durationMs / 1000) : null;
+
+  await pushState('sensor.proxmoxadminpanel_total_containers_with_updates', totalWithUpdates,
+    { friendly_name: 'Proxmox Admin — Total Updates Pending', unit_of_measurement: 'containers', icon: 'mdi:package-up' });
+
+  await pushState('sensor.proxmoxadminpanel_total_containers_checked', totalChecked,
+    { friendly_name: 'Proxmox Admin — Total Containers Checked', unit_of_measurement: 'containers', icon: 'mdi:server-network' });
+
+  await pushState('sensor.proxmoxadminpanel_last_check', cache.lastRun || now,
+    { friendly_name: 'Proxmox Admin — Last Check', device_class: 'timestamp', icon: 'mdi:clock-check' });
+
+  await pushState('sensor.proxmoxadminpanel_last_check_trigger', trigger,
+    { friendly_name: 'Proxmox Admin — Last Check Trigger', icon: 'mdi:calendar-clock' });
+
+  await pushState('sensor.proxmoxadminpanel_last_check_outcome', outcome,
+    { friendly_name: 'Proxmox Admin — Last Check Outcome', icon: 'mdi:check-circle' });
+
+  if (durationSecs !== null) {
+    await pushState('sensor.proxmoxadminpanel_last_check_duration_seconds', durationSecs,
+      { friendly_name: 'Proxmox Admin — Last Check Duration', unit_of_measurement: 's', icon: 'mdi:timer' });
+  }
+
+  console.log(`[ha] Pushed ${Object.keys(byHost).length} host(s) + global sensors to Home Assistant`);
+}
+
+// ── HA Routes ─────────────────────────────────────────────────────────────────
+
+// Get current HA config (token redacted)
+app.get('/api/ha/config', (req, res) => {
+  const cfg = loadHaConfig();
+  if (!cfg) return res.json({ configured: false });
+  res.json({ configured: true, url: cfg.url, tokenHint: '••••••••' + (cfg.token?.slice(-4) || '') });
+});
+
+// Save + test HA connection
+app.post('/api/ha/connect', async (req, res) => {
+  const { url, token } = req.body;
+  if (!url || !token) return res.status(400).json({ ok: false, error: 'URL and token are required' });
+
+  const base = url.replace(/\/$/, '');
+  try {
+    // Test connection by hitting the HA API
+    const test = await axios.get(`${base}/api/`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 10000,
+    });
+    const haVersion = test.data?.version || 'unknown';
+
+    // Save config
+    saveHaConfig({ url: base, token });
+
+    // Push current state immediately
+    await pushHaSensors(null, 'manual');
+
+    res.json({ ok: true, haVersion });
+  } catch (err) {
+    const detail = err.response?.status === 401
+      ? 'Invalid token — check your Long-Lived Access Token'
+      : err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT'
+        ? 'Could not reach Home Assistant — check the URL'
+        : err.message;
+    res.status(502).json({ ok: false, error: detail });
+  }
+});
+
+// Disconnect / remove HA config
+app.delete('/api/ha/config', (req, res) => {
+  try { fs.unlinkSync(HA_CONFIG_PATH); } catch {}
+  res.json({ ok: true });
+});
+
+// Manual push (test button)
+app.post('/api/ha/push', async (req, res) => {
+  const cfg = loadHaConfig();
+  if (!cfg) return res.status(400).json({ ok: false, error: 'Not connected to Home Assistant' });
+  await pushHaSensors(null, 'manual');
+  res.json({ ok: true });
+});

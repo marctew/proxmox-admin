@@ -1,0 +1,7 @@
+node_modules/
+dist/
+config/auth.json
+config/proxmox-hosts.json
+.env
+*.log
+config/ha-config.json

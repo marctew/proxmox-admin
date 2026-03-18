@@ -5,7 +5,7 @@ import {
   Wifi, WifiOff, AlertCircle, CheckCircle, Clock, Settings, X, Eye,
   EyeOff, Zap, Monitor, Box, Activity, ExternalLink, Loader, Search, Tag, LogOut,
   Shield, Palette, Wrench, ChevronLeft, Save, Key, RefreshCw as Reset,
-  PackageCheck, Calendar
+  PackageCheck, Calendar, Home, Link, Unlink
 } from 'lucide-react'
 
 // ── API helpers ──────────────────────────────────────────────────────────────
@@ -1613,6 +1613,50 @@ function AdminPage({ onBack, onLogout, hosts }) {
   const [sshLoading, setSshLoading] = useState(false)
   const [sshOutput, setSshOutput] = useState('')
 
+  // Home Assistant state
+  const [ha, setHa] = useState(null) // null = loading
+  const [haUrl, setHaUrl] = useState('')
+  const [haToken, setHaToken] = useState('')
+  const [haConnecting, setHaConnecting] = useState(false)
+  const [haPushing, setHaPushing] = useState(false)
+  const [haMsg, setHaMsg] = useState(null)
+
+  useEffect(() => {
+    api.get('/api/ha/config').then(res => {
+      setHa(res)
+      if (res.configured) setHaUrl(res.url)
+    })
+  }, [])
+
+  async function connectHa() {
+    if (!haUrl || !haToken) return
+    setHaConnecting(true); setHaMsg(null)
+    const res = await api.post('/api/ha/connect', { url: haUrl, token: haToken })
+    setHaConnecting(false)
+    if (res.ok) {
+      setHa({ configured: true, url: haUrl, tokenHint: '••••••••' + haToken.slice(-4) })
+      setHaToken('')
+      setHaMsg({ type: 'success', text: `Connected to Home Assistant ${res.haVersion} — sensors pushed` })
+    } else {
+      setHaMsg({ type: 'error', text: res.error || 'Connection failed' })
+    }
+  }
+
+  async function disconnectHa() {
+    await api.cancel('/api/ha/config')
+    setHa({ configured: false })
+    setHaUrl(''); setHaToken('')
+    setHaMsg({ type: 'success', text: 'Disconnected from Home Assistant' })
+  }
+
+  async function pushHa() {
+    setHaPushing(true); setHaMsg(null)
+    const res = await api.post('/api/ha/push')
+    setHaPushing(false)
+    if (res.ok) setHaMsg({ type: 'success', text: 'Sensors pushed to Home Assistant' })
+    else setHaMsg({ type: 'error', text: res.error || 'Push failed' })
+  }
+
   // Scheduler state
   const [sched, setSched] = useState({ enabled: false, hour: 3, minute: 0, concurrency: 1, sshTimeout: 120 })
   const [schedLoading, setSchedLoading] = useState(false)
@@ -1929,6 +1973,76 @@ function AdminPage({ onBack, onLogout, hosts }) {
               {checkRunning ? 'Running...' : 'Run Check Now'}
             </Btn>
           </div>
+        </AdminSection>
+
+        {/* ── Home Assistant ── */}
+        <AdminSection title="Home Assistant" icon={<Home size={16} />}>
+          {haMsg && (
+            <div style={{ marginBottom: 14, padding: '8px 12px', borderRadius: 'var(--radius)', fontSize: 'var(--fs-xs)',
+              background: haMsg.type === 'error' ? 'var(--red-dim)' : 'var(--green-dim)',
+              color: haMsg.type === 'error' ? 'var(--red)' : 'var(--green)',
+              border: `1px solid ${haMsg.type === 'error' ? 'rgba(255,85,85,0.3)' : 'rgba(80,250,123,0.3)'}`,
+            }}>
+              {haMsg.text}
+            </div>
+          )}
+
+          {ha?.configured ? (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 14px', background: 'var(--bg2)', borderRadius: 'var(--radius)', border: '1px solid rgba(80,250,123,0.2)', marginBottom: 16 }}>
+                <Link size={14} style={{ color: 'var(--green)', flexShrink: 0 }} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 'var(--fs-sm)', color: 'var(--green)' }}>Connected</div>
+                  <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>{ha.url} · {ha.tokenHint}</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <Btn variant="ghost" size="sm" onClick={pushHa} loading={haPushing}>
+                  <RefreshCw size={13} /> Push sensors now
+                </Btn>
+                <Btn variant="danger" size="sm" onClick={disconnectHa}>
+                  <Unlink size={13} /> Disconnect
+                </Btn>
+              </div>
+              <div style={{ marginTop: 12, padding: '10px 12px', background: 'var(--bg2)', borderRadius: 'var(--radius)', border: '1px solid var(--border)' }}>
+                <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', marginBottom: 6, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>Sensors created</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {[
+                    'total_containers_with_updates',
+                    'total_containers_checked',
+                    'last_check',
+                    'last_check_trigger',
+                    'last_check_outcome',
+                    'last_check_duration_seconds',
+                  ].map(s => (
+                    <span key={s} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', padding: '2px 7px', background: 'var(--bg3)', borderRadius: 4, color: 'var(--text3)' }}>
+                      proxmoxadminpanel_{s}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <p style={{ fontSize: 'var(--fs-sm)', color: 'var(--text3)', marginBottom: 16 }}>
+                Connect to Home Assistant to automatically push update sensors after every check.
+                Generate a Long-Lived Access Token in your HA profile settings.
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 14 }}>
+                <div>
+                  <label>Home Assistant URL</label>
+                  <input value={haUrl} onChange={e => setHaUrl(e.target.value)} placeholder="http://192.168.4.x:8123" />
+                </div>
+                <div>
+                  <label>Long-Lived Access Token</label>
+                  <input type="password" value={haToken} onChange={e => setHaToken(e.target.value)} placeholder="eyJ0eXAiOiJKV1Qi..." />
+                </div>
+              </div>
+              <Btn variant="accent" size="sm" onClick={connectHa} loading={haConnecting} disabled={!haUrl || !haToken}>
+                <Link size={13} /> Connect
+              </Btn>
+            </>
+          )}
         </AdminSection>
 
         {/* ── Check History ── */}
