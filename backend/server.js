@@ -20,10 +20,12 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ noServer: true });
 
 const PORT = process.env.PORT || 3001;
-const CONFIG_PATH      = path.join('/app/config', 'proxmox-hosts.json');
-const AUTH_PATH        = path.join('/app/config', 'auth.json');
-const SCHEDULER_PATH   = path.join('/app/config', 'scheduler.json');
-const UPDATE_CACHE_PATH = path.join('/app/config', 'update-cache.json');
+const CONFIG_PATH        = path.join('/app/config', 'proxmox-hosts.json');
+const AUTH_PATH          = path.join('/app/config', 'auth.json');
+const SCHEDULER_PATH     = path.join('/app/config', 'scheduler.json');
+const UPDATE_CACHE_PATH  = path.join('/app/config', 'update-cache.json');
+const UPDATE_HISTORY_PATH = path.join('/app/config', 'update-history.json');
+const MAX_HISTORY = 50; // keep last 50 runs
 
 // ── Brute force lockout ──────────────────────────────────────────────────────
 
@@ -146,11 +148,25 @@ function saveConfig(config) {
 
 function loadScheduler() {
   try { if (fs.existsSync(SCHEDULER_PATH)) return JSON.parse(fs.readFileSync(SCHEDULER_PATH, 'utf8')); } catch {}
-  return { enabled: false, hour: 3, minute: 0, concurrency: 1 };
+  return { enabled: false, hour: 3, minute: 0, concurrency: 1, sshTimeout: 120 };
 }
 function saveScheduler(s) {
   fs.mkdirSync(path.dirname(SCHEDULER_PATH), { recursive: true });
   fs.writeFileSync(SCHEDULER_PATH, JSON.stringify(s, null, 2));
+}
+
+// ── Update history ───────────────────────────────────────────────────────────
+
+function loadHistory() {
+  try { if (fs.existsSync(UPDATE_HISTORY_PATH)) return JSON.parse(fs.readFileSync(UPDATE_HISTORY_PATH, 'utf8')); } catch {}
+  return [];
+}
+function appendHistory(entry) {
+  const history = loadHistory();
+  history.unshift(entry); // newest first
+  if (history.length > MAX_HISTORY) history.splice(MAX_HISTORY);
+  fs.mkdirSync(path.dirname(UPDATE_HISTORY_PATH), { recursive: true });
+  fs.writeFileSync(UPDATE_HISTORY_PATH, JSON.stringify(history, null, 2));
 }
 
 // ── Update cache ─────────────────────────────────────────────────────────────
@@ -231,12 +247,13 @@ function sshStream(host, command, jobId, timeoutMs = 120000) {
 
 // ── SSH exec (no job, returns stdout as string) ──────────────────────────────
 
-function sshExec(host, command, timeoutMs = 60000) {
+function sshExec(host, command, timeoutMs = 60000, connSet = null) {
   return new Promise((resolve) => {
     const conn = new SSHClient();
+    if (connSet) connSet.add(conn);
     let settled = false;
     let output = '';
-    let timer = setTimeout(() => { if (!settled) { settled = true; conn.end(); resolve({ output, exitCode: 1, timedOut: true }); } }, timeoutMs);
+    let timer = setTimeout(() => { if (!settled) { settled = true; if (connSet) connSet.delete(conn); conn.end(); resolve({ output, exitCode: 1, timedOut: true }); } }, timeoutMs);
 
     conn.on('ready', () => {
       conn.exec(command, { pty: false }, (err, stream) => {
@@ -245,14 +262,14 @@ function sshExec(host, command, timeoutMs = 60000) {
         stream.stderr.on('data', d => { output += d.toString(); });
         stream.on('close', (code) => {
           if (settled) return;
-          settled = true; clearTimeout(timer); conn.end();
+          settled = true; clearTimeout(timer); if (connSet) connSet.delete(conn); conn.end();
           resolve({ output, exitCode: code });
         });
       });
     });
     conn.on('error', (err) => {
       if (settled) return;
-      settled = true; clearTimeout(timer);
+      settled = true; clearTimeout(timer); if (connSet) connSet.delete(conn);
       resolve({ output: `SSH error: ${err.message}`, exitCode: 1 });
     });
     conn.connect({ host: host.ip, port: host.sshPort || 22, username: host.sshUser || 'root', password: host.password, readyTimeout: 10000 });
@@ -264,12 +281,15 @@ function sshExec(host, command, timeoutMs = 60000) {
 let checkRunning = false;  // lock — prevents concurrent update checks
 let upgradeRunning = false; // lock — prevents concurrent upgrade runs
 let checkProgress = { current: 0, total: 0, currentName: '' };
+let checkCancelled = false; // set to true to abort in-flight check
+const activeCheckConns = new Set(); // SSH connections for current check — killed on cancel
 
 const APT_CHECK_CMD = 'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null';
 
 async function runUpdateCheck() {
   // Note: checkRunning must be set to true by caller before invoking this function
   // This prevents async race conditions between concurrent HTTP requests
+  const startedAt = Date.now();
   console.log('[scheduler] Running update check across all hosts...');
   const config = loadConfig();
   const results = [];
@@ -291,15 +311,17 @@ async function runUpdateCheck() {
     try {
       const nodes = await proxmoxGet(host, '/nodes');
       for (const node of nodes) {
+        if (checkCancelled) break;
         const lxcs = await proxmoxGet(host, `/nodes/${node.node}/lxc`).catch(() => []);
         const running = lxcs.filter(l => l.status === 'running');
 
         for (const lxc of running) {
+          if (checkCancelled) break;
           checkProgress.current += 1;
           checkProgress.currentName = lxc.name;
           try {
             const cmd = `pct exec ${lxc.vmid} -- sh -c ${JSON.stringify(APT_CHECK_CMD)} </dev/null`;
-            const { output, exitCode, timedOut } = await sshExec(host, cmd, 60000);
+            const { output, exitCode, timedOut } = await sshExec(host, cmd, 60000, activeCheckConns);
 
             const packages = output
               .split('\n')
@@ -337,9 +359,35 @@ async function runUpdateCheck() {
     }
   }
 
-  saveUpdateCache({ lastRun: new Date().toISOString(), containers: results });
-  console.log(`[scheduler] Done. ${results.filter(r => r.hasUpdates).length} containers have updates.`);
+  if (!checkCancelled) {
+    const finishedAt = new Date().toISOString();
+    const withUpdates = results.filter(r => r.hasUpdates).length;
+    saveUpdateCache({ lastRun: finishedAt, containers: results });
+    appendHistory({
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt,
+      durationMs: Date.now() - startedAt,
+      checked: results.length,
+      withUpdates,
+      errors: results.filter(r => r.error).length,
+      cancelled: false,
+    });
+    console.log(`[scheduler] Done. ${withUpdates} containers have updates.`);
+  } else {
+    appendHistory({
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      checked: results.length,
+      withUpdates: results.filter(r => r.hasUpdates).length,
+      errors: results.filter(r => r.error).length,
+      cancelled: true,
+    });
+    console.log('[scheduler] Check was cancelled.');
+  }
   checkProgress = { current: 0, total: 0, currentName: '' };
+  checkCancelled = false;
+  activeCheckConns.clear();
   checkRunning = false;
   return results;
 }
@@ -466,6 +514,8 @@ app.post('/api/scheduler', (req, res) => {
     hour: Math.max(0, Math.min(23, parseInt(hour) || 3)),
     minute: Math.max(0, Math.min(59, parseInt(minute) || 0)),
     concurrency: ['1','3','5','unlimited'].includes(String(concurrency)) ? concurrency : 1,
+    sshTimeout: [60, 120, 300, 600, 900].includes(parseInt(req.body.sshTimeout)) ? parseInt(req.body.sshTimeout) : 120,
+
   };
   saveScheduler(sched);
   startCron(); // restart with new settings
@@ -488,6 +538,16 @@ app.post('/api/scheduler/run-now', (req, res) => {
   });
 });
 
+// Cancel in-flight check
+app.delete('/api/scheduler/run-now', (req, res) => {
+  if (!checkRunning) return res.json({ ok: true, message: 'No check running' });
+  checkCancelled = true;
+  // Kill all active SSH connections immediately
+  for (const conn of activeCheckConns) { try { conn.end(); } catch {} }
+  activeCheckConns.clear();
+  res.json({ ok: true, message: 'Check cancelled' });
+});
+
 // Check status — lets frontend poll whether a check is running
 app.get('/api/scheduler/status', (req, res) => {
   res.json({
@@ -500,6 +560,11 @@ app.get('/api/scheduler/status', (req, res) => {
 // Get cached update results
 app.get('/api/updates', (req, res) => {
   res.json(loadUpdateCache());
+});
+
+// Get check history
+app.get('/api/updates/history', (req, res) => {
+  res.json(loadHistory());
 });
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -623,8 +688,9 @@ app.post('/api/updates/run-all', (req, res) => {
     broadcast(jobId, { type: 'done', exitCode: 0 });
     upgradeRunning = false;
 
-    // Re-run check to refresh update cache
-    if (!checkRunning) {
+    // Re-run check only if enabled in settings
+    const schedSettings = loadScheduler();
+    if (schedSettings.recheckAfterUpgrade && !checkRunning) {
       checkRunning = true;
       await runUpdateCheck();
     }
@@ -758,7 +824,9 @@ app.post('/api/hosts/:id/exec', async (req, res) => {
   const job = createJob(jobId, { command, vmid, node });
   res.json({ ok: true, jobId });
   const pctCmd = `pct exec ${vmid} -- sh -c ${JSON.stringify(cmds[command])}`;
-  sshStream(host, pctCmd, jobId).then((exitCode) => {
+  const schedCfg = loadScheduler();
+  const timeoutMs = (schedCfg.sshTimeout || 120) * 1000;
+  sshStream(host, pctCmd, jobId, timeoutMs).then((exitCode) => {
     job.status = 'done'; job.exitCode = exitCode;
     broadcast(jobId, { type: 'done', exitCode });
   });

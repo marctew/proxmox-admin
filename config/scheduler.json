@@ -1,6 +1,7 @@
 {
   "enabled": true,
-  "hour": 1,
+  "hour": 23,
   "minute": 0,
-  "concurrency": 1
+  "concurrency": 1,
+  "sshTimeout": 300
 }

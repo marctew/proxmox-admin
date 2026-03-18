@@ -5,7 +5,7 @@ import {
   Wifi, WifiOff, AlertCircle, CheckCircle, Clock, Settings, X, Eye,
   EyeOff, Zap, Monitor, Box, Activity, ExternalLink, Loader, Search, Tag, LogOut,
   Shield, Palette, Wrench, ChevronLeft, Save, Key, RefreshCw as Reset,
-  PackageCheck, Calendar, Timer, ListChecks, PlayCircle, SkipForward
+  PackageCheck, Calendar
 } from 'lucide-react'
 
 // ── API helpers ──────────────────────────────────────────────────────────────
@@ -14,6 +14,7 @@ const api = {
   get: (url) => fetch(url).then(r => r.json()),
   post: (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json()),
   del: (url) => fetch(url, { method: 'DELETE' }).then(r => r.json()),
+  cancel: (url) => fetch(url, { method: 'DELETE' }).then(r => r.json()),
 }
 
 // ── Theme / Settings ─────────────────────────────────────────────────────────
@@ -613,7 +614,7 @@ function PortsModal({ guest, hostId, onClose }) {
 
 // ── VM / LXC Card ────────────────────────────────────────────────────────────
 
-function GuestCard({ guest, hostId, onAction, checkRunning }) {
+function GuestCard({ guest, hostId, onAction, updatePending }) {
   const [expanded, setExpanded] = useState(false)
   const [actionLoading, setActionLoading] = useState(null)
   const [showUpdates, setShowUpdates] = useState(false)
@@ -641,7 +642,7 @@ function GuestCard({ guest, hostId, onAction, checkRunning }) {
   return (
     <div style={{
       background: 'var(--bg1)',
-      border: `1px solid ${running ? 'rgba(80,250,123,0.15)' : 'var(--border)'}`,
+      border: `1px solid ${updatePending ? 'rgba(255,179,71,0.3)' : running ? 'rgba(80,250,123,0.15)' : 'var(--border)'}`,
       borderRadius: 'var(--radius-lg)',
       overflow: 'hidden',
       transition: 'border-color 0.2s',
@@ -652,13 +653,21 @@ function GuestCard({ guest, hostId, onAction, checkRunning }) {
         style={{ padding: '12px 16px 8px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12 }}
         onClick={() => setExpanded(e => !e)}
       >
-        <div style={{
-          width: 32, height: 32, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: isVM ? 'var(--blue-dim)' : 'var(--purple-dim)',
-          color: isVM ? 'var(--blue)' : 'var(--purple)',
-          flexShrink: 0,
-        }}>
-          <GuestIcon name={guest.name} type={guest.type} size={20} hostId={guest.hostId} vmid={guest.vmid} />
+        <div style={{ position: 'relative', flexShrink: 0 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: isVM ? 'var(--blue-dim)' : 'var(--purple-dim)',
+            color: isVM ? 'var(--blue)' : 'var(--purple)',
+          }}>
+            <GuestIcon name={guest.name} type={guest.type} size={20} hostId={guest.hostId} vmid={guest.vmid} />
+          </div>
+          {updatePending && (
+            <span style={{
+              position: 'absolute', top: -3, right: -3,
+              width: 10, height: 10, borderRadius: '50%',
+              background: 'var(--amber)', border: '2px solid var(--bg1)',
+            }} title="Updates available" />
+          )}
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -853,7 +862,7 @@ function tagColour(tag) {
 
 // ── Tag Group ────────────────────────────────────────────────────────────────
 
-function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, checkRunning }) {
+function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, updateVmids }) {
   const [collapsed, setCollapsed] = useState(true)
 
   // Sync with external collapse/expand all — only when prop changes
@@ -961,7 +970,7 @@ function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, chec
             </div>
           )}
           {visibleGuests.map(g => (
-            <GuestCard key={`${g.type}-${g.vmid}`} guest={g} hostId={hostId} onAction={onAction} checkRunning={checkRunning} />
+            <GuestCard key={`${g.type}-${g.vmid}`} guest={g} hostId={hostId} onAction={onAction} updatePending={updateVmids?.has(String(g.vmid))} />
           ))}
         </div>
       )}
@@ -971,15 +980,20 @@ function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, chec
 
 // ── Node section ──────────────────────────────────────────────────────────────
 
-function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, checkRunning }) {
+function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, updateCache }) {
   const ns = nodeData.nodeStatus || {}
   const cpuPct = ns.cpu ? Math.round(ns.cpu * 100) : 0
   const memPct = pct(ns.memory?.used, ns.memory?.total)
   const allGuests = [...(nodeData.vms || []), ...(nodeData.lxcs || [])]
   const running = allGuests.filter(g => g.status === 'running').length
 
-  // Apply type filter
-  const typeFiltered = filter === 'all' ? allGuests : allGuests.filter(g => g.type === filter)
+  // Build set of vmids with pending updates for fast lookup
+  const updateVmids = new Set((updateCache?.containers || []).filter(c => c.hasUpdates).map(c => String(c.vmid)))
+
+  // Apply type filter (updates filter shows only LXCs with pending updates)
+  const typeFiltered = filter === 'updates'
+    ? allGuests.filter(g => g.type === 'lxc' && updateVmids.has(String(g.vmid)))
+    : filter === 'all' ? allGuests : allGuests.filter(g => g.type === filter)
 
   // Apply search filter
   const q = search.trim().toLowerCase()
@@ -1018,7 +1032,7 @@ function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, 
             onAction={onAction}
             hideHeader={singleUntaggedGroup}
             collapseAll={collapseAll}
-            checkRunning={checkRunning}
+            updateVmids={updateVmids}
           />
         ))}
       </div>
@@ -1026,11 +1040,51 @@ function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, 
   )
 }
 
+
+// ── Delete Host Modal ─────────────────────────────────────────────────────────
+
+function DeleteHostModal({ host, onClose, onConfirm }) {
+  const [typed, setTyped] = useState('')
+  const matches = typed.toLowerCase() === host.name.toLowerCase()
+
+  function handleKey(e) { if (e.key === 'Enter' && matches) onConfirm() }
+
+  return (
+    <Modal title="Remove host" onClose={onClose}>
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ padding: '12px 14px', background: 'var(--red-dim)', border: '1px solid rgba(255,85,85,0.25)', borderRadius: 'var(--radius)', marginBottom: 16 }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+            <AlertCircle size={15} style={{ color: 'var(--red)', flexShrink: 0, marginTop: 1 }} />
+            <div style={{ fontSize: 'var(--fs-sm)', color: 'var(--red)' }}>
+              This will remove <strong>{host.name}</strong> from the panel. Your Proxmox host itself won't be affected.
+            </div>
+          </div>
+        </div>
+        <label>Type <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)', background: 'var(--bg3)', padding: '1px 6px', borderRadius: 4 }}>{host.name}</span> to confirm</label>
+        <input
+          value={typed}
+          onChange={e => setTyped(e.target.value)}
+          onKeyDown={handleKey}
+          placeholder={host.name}
+          autoFocus
+          style={{ borderColor: typed.length > 0 ? (matches ? 'var(--green)' : 'var(--red)') : undefined }}
+        />
+      </div>
+      <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+        <Btn onClick={onClose}>Cancel</Btn>
+        <Btn variant="danger" onClick={onConfirm} disabled={!matches}>
+          <Trash2 size={13} /> Remove host
+        </Btn>
+      </div>
+    </Modal>
+  )
+}
+
 // ── Host Panel ────────────────────────────────────────────────────────────────
 
 const REFRESH_INTERVAL = 30000
 
-function HostPanel({ host, onDelete, onAction, filter, search, checkRunning }) {
+function HostPanel({ host, onDelete, onAction, filter, search, updateCache }) {
   // Load cached scan data immediately so cards show on mount
   const cached = loadScanCache(host.id)
   const [scanData, setScanData] = useState(cached?.nodes || null)
@@ -1040,6 +1094,7 @@ function HostPanel({ host, onDelete, onAction, filter, search, checkRunning }) {
   const [testResult, setTestResult] = useState(null)
   const [lastRefresh, setLastRefresh] = useState(cached?.savedAt ? new Date(cached.savedAt) : null)
   const [collapseAll, setCollapseAll] = useState(null)
+  const [showDelete, setShowDelete] = useState(false)
   const intervalRef = useRef(null)
   const hasScanned = useRef(false)
 
@@ -1130,12 +1185,20 @@ function HostPanel({ host, onDelete, onAction, filter, search, checkRunning }) {
           <Btn size="xs" variant="accent" onClick={() => scan(false)} loading={scanning}>
             <RefreshCw size={12} style={{ animation: scanning ? 'spin 1s linear infinite' : 'none' }} /> Scan
           </Btn>
-          <Btn size="xs" variant="danger" onClick={() => onDelete(host.id)} title="Remove host">
+          <Btn size="xs" variant="danger" onClick={() => setShowDelete(true)} title="Remove host">
             <Trash2 size={12} />
           </Btn>
         </div>
 
       </div>
+
+      {showDelete && (
+        <DeleteHostModal
+          host={host}
+          onClose={() => setShowDelete(false)}
+          onConfirm={() => { setShowDelete(false); onDelete(host.id) }}
+        />
+      )}
 
       {scanErr && (
         <div style={{ marginBottom: 12, padding: '10px 14px', background: 'var(--red-dim)', border: '1px solid rgba(255,85,85,0.2)', borderRadius: 'var(--radius)', color: 'var(--red)', fontSize: 'var(--fs-xs)', display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1151,7 +1214,7 @@ function HostPanel({ host, onDelete, onAction, filter, search, checkRunning }) {
       )}
 
       {scanData && scanData.map(node => (
-        <NodeSection key={node.node} nodeData={node} hostId={host.id} onAction={onAction} filter={filter} search={search} collapseAll={collapseAll} checkRunning={checkRunning} />
+        <NodeSection key={node.node} nodeData={node} hostId={host.id} onAction={onAction} filter={filter} search={search} collapseAll={collapseAll} updateCache={updateCache} />
       ))}
     </div>
   )
@@ -1538,14 +1601,17 @@ function AdminPage({ onBack, onLogout, hosts }) {
   const [sshOutput, setSshOutput] = useState('')
 
   // Scheduler state
-  const [sched, setSched] = useState({ enabled: false, hour: 3, minute: 0, concurrency: 1 })
+  const [sched, setSched] = useState({ enabled: false, hour: 3, minute: 0, concurrency: 1, sshTimeout: 120 })
   const [schedLoading, setSchedLoading] = useState(false)
   const [schedSaved, setSchedSaved] = useState(false)
   const [checkRunning, setCheckRunning] = useState(false)
+  const [history, setHistory] = useState([])
+  const [historyExpanded, setHistoryExpanded] = useState(false)
   const checkPollRef = useRef(null)
 
   useEffect(() => {
     api.get('/api/scheduler').then(res => setSched(res))
+    api.get('/api/updates/history').then(res => { if (Array.isArray(res)) setHistory(res) })
     // Poll status every 5s so button stays disabled across all windows
     const syncStatus = () => api.get('/api/scheduler/status').then(res => setCheckRunning(res.running))
     syncStatus()
@@ -1809,7 +1875,7 @@ function AdminPage({ onBack, onLogout, hosts }) {
               }} />
             </button>
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16, opacity: sched.enabled ? 1 : 0.4, pointerEvents: sched.enabled ? 'auto' : 'none' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16, marginBottom: 16, opacity: sched.enabled ? 1 : 0.4, pointerEvents: sched.enabled ? 'auto' : 'none' }}>
             <div>
               <label>Run at (UTC hour)</label>
               <select value={sched.hour} onChange={e => setSched(s => ({ ...s, hour: parseInt(e.target.value) }))}>
@@ -1827,7 +1893,18 @@ function AdminPage({ onBack, onLogout, hosts }) {
                 <option value="unlimited">All at once (fastest)</option>
               </select>
             </div>
+            <div>
+              <label>Update terminal timeout</label>
+              <select value={sched.sshTimeout} onChange={e => setSched(s => ({ ...s, sshTimeout: parseInt(e.target.value) }))}>
+                <option value="60">60 seconds</option>
+                <option value="120">120 seconds (default)</option>
+                <option value="300">5 minutes</option>
+                <option value="600">10 minutes</option>
+                <option value="900">15 minutes</option>
+              </select>
+            </div>
           </div>
+
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <Btn variant="accent" size="sm" onClick={saveScheduler} loading={schedLoading}>
               <Save size={13} /> Save
@@ -1841,321 +1918,63 @@ function AdminPage({ onBack, onLogout, hosts }) {
           </div>
         </AdminSection>
 
-      </main>
-    </div>
-  )
-}
-
-
-// ── Updates Page ──────────────────────────────────────────────────────────────
-
-function UpdatesPage({ onBack, onLogout }) {
-  const [cache, setCache] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [runAllJobId, setRunAllJobId] = useState(null)
-  const [runAllLines, setRunAllLines] = useState([])
-  const [runAllStatus, setRunAllStatus] = useState(null)
-  const [selected, setSelected] = useState(new Set())
-  const [checkingNow, setCheckingNow] = useState(false)
-  const [upgradingNow, setUpgradingNow] = useState(false)
-  const [checkProgress, setCheckProgress] = useState({ current: 0, total: 0, currentName: '' })
-  const outputRef = useRef(null)
-  const wsRef = useRef(null)
-
-  async function loadCache() {
-    setLoading(true)
-    const res = await api.get('/api/updates')
-    setCache(res)
-    setLoading(false)
-  }
-
-  async function checkNow() {
-    const trigger = await api.post('/api/scheduler/run-now')
-    if (trigger.busy) {
-      // Already running in another window — just show spinner and wait
-      setCheckingNow(true)
-    } else {
-      setCheckingNow(true)
-    }
-    // Either way, poll until server says it's done
-    const poll = setInterval(async () => {
-      const status = await api.get('/api/scheduler/status')
-      if (!status.running) {
-        clearInterval(poll)
-        const res = await api.get('/api/updates')
-        setCache(res)
-        setCheckingNow(false)
-      }
-    }, 3000)
-  }
-
-  function toggleSelect(key) {
-    setSelected(prev => {
-      const next = new Set(prev)
-      if (next.has(key)) next.delete(key)
-      else next.add(key)
-      return next
-    })
-  }
-
-  function selectAll() {
-    const withUpdates = (cache?.containers || []).filter(c => c.hasUpdates)
-    setSelected(new Set(withUpdates.map(c => `${c.hostId}:${c.vmid}`)))
-  }
-
-  function selectNone() { setSelected(new Set()) }
-
-  async function runUpdates() {
-    const withUpdates = (cache?.containers || []).filter(c => c.hasUpdates)
-    const targets = withUpdates.filter(c => selected.has(`${c.hostId}:${c.vmid}`))
-    if (!targets.length) return
-
-    const vmids = targets.map(c => ({ hostId: c.hostId, node: c.node, vmid: c.vmid, name: c.name }))
-    const res = await api.post('/api/updates/run-all', { vmids })
-    if (res.busy) { alert('An upgrade is already running'); return }
-    if (!res.ok) return
-    setUpgradingNow(true)
-
-    setRunAllJobId(res.jobId)
-    setRunAllLines([])
-    setRunAllStatus('running')
-
-    const ws = new WebSocket(`ws://${window.location.host}/ws`)
-    wsRef.current = ws
-    ws.onopen = () => ws.send(JSON.stringify({ subscribe: res.jobId }))
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data)
-      if (msg.type === 'replay') {
-        setRunAllLines(msg.lines.map(l => l.v))
-      } else if (msg.type === 'line' || msg.type === 'stderr') {
-        setRunAllLines(prev => [...prev, msg.line])
-      } else if (msg.type === 'done') {
-        setRunAllStatus('done')
-        ws.close()
-        // Reload cache after done
-        setTimeout(loadCache, 2000)
-      }
-    }
-  }
-
-  useEffect(() => {
-    loadCache()
-    // Use ref to avoid stale closure on checkingNow inside interval
-    const wasRunningRef = { current: false }
-    const syncStatus = async () => {
-      const status = await api.get('/api/scheduler/status')
-      // If just finished, reload cache
-      if (!status.running && wasRunningRef.current) loadCache()
-      wasRunningRef.current = status.running
-      setCheckingNow(status.running)
-      setUpgradingNow(!!status.upgrading)
-      if (status.progress) setCheckProgress(status.progress)
-    }
-    syncStatus()
-    const statusPoll = setInterval(syncStatus, 2000)
-    return () => { wsRef.current?.close(); clearInterval(statusPoll) }
-  }, [])
-
-  useEffect(() => {
-    if (outputRef.current) outputRef.current.scrollTop = outputRef.current.scrollHeight
-  }, [runAllLines])
-
-  const withUpdates = (cache?.containers || []).filter(c => c.hasUpdates)
-  const upToDate = (cache?.containers || []).filter(c => !c.hasUpdates && !c.error)
-  const errors = (cache?.containers || []).filter(c => c.error)
-
-  // Group by host
-  const byHost = {}
-  for (const c of withUpdates) {
-    if (!byHost[c.hostName]) byHost[c.hostName] = []
-    byHost[c.hostName].push(c)
-  }
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
-      <style>{`@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }`}</style>
-
-      <header className="px-main-header" style={{ borderBottom: '1px solid var(--border)', background: 'var(--bg1)', padding: '0 24px', position: 'sticky', top: 0, zIndex: 50 }}>
-        <div style={{ maxWidth: 1000, margin: '0 auto', display: 'flex', alignItems: 'center', gap: 14, height: 56 }}>
-          <Btn variant="ghost" size="xs" onClick={onBack}><ChevronLeft size={14} /> Back</Btn>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <PackageCheck size={15} style={{ color: 'var(--accent)' }} />
-            <span style={{ fontWeight: 600, fontSize: 'var(--fs-md)' }}>Pending Updates</span>
-          </div>
-          {cache?.lastRun && (
-            <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>
-              Last checked: {new Date(cache.lastRun).toLocaleString()}
-            </span>
-          )}
-          <div style={{ flex: 1 }} />
-          <Btn variant="ghost" size="xs" onClick={checkNow} loading={checkingNow} disabled={checkingNow || upgradingNow}>
-            <RefreshCw size={12} style={{ animation: checkingNow ? 'spin 1s linear infinite' : 'none' }} />
-            {checkingNow && checkProgress.total > 0
-              ? `${checkProgress.current}/${checkProgress.total}`
-              : checkingNow ? 'Checking...' : 'Check Now'}
-          </Btn>
-          <Btn variant="ghost" size="xs" onClick={onLogout}><LogOut size={13} /></Btn>
-        </div>
-      </header>
-
-      <main className="px-main-content" style={{ flex: 1, padding: '24px', maxWidth: 1000, margin: '0 auto', width: '100%' }}>
-
-        {loading && (
-          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text3)' }}>
-            <Loader size={28} style={{ animation: 'spin 1s linear infinite', marginBottom: 12 }} />
-            <p>Loading update cache...</p>
-          </div>
-        )}
-
-        {!loading && !cache?.lastRun && (
-          <div style={{ textAlign: 'center', padding: '60px 0', color: 'var(--text3)' }}>
-            <Calendar size={48} style={{ marginBottom: 16, opacity: 0.2 }} />
-            <h2 style={{ fontSize: 'var(--fs-xl)', fontWeight: 600, color: 'var(--text2)', marginBottom: 8 }}>No check run yet</h2>
-            <p style={{ marginBottom: 24 }}>Configure the scheduler in Admin, or run a check now.</p>
-            <p style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>Note: update checks run on LXC containers only.</p>
-            <Btn variant="accent" size="md" onClick={checkNow} loading={checkingNow} disabled={checkingNow || upgradingNow}>
-              <RefreshCw size={14} />
-              {checkingNow && checkProgress.total > 0 ? `Checking ${checkProgress.current}/${checkProgress.total}...` : 'Run Check Now'}
-            </Btn>
-          </div>
-        )}
-
-        {!loading && cache?.lastRun && (
-          <>
-            {/* Summary bar */}
-            <div style={{ display: 'flex', gap: 12, marginBottom: 24, flexWrap: 'wrap' }}>
-              <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: withUpdates.length > 0 ? 'var(--amber-dim)' : 'var(--green-dim)', border: `1px solid ${withUpdates.length > 0 ? 'rgba(255,179,71,0.3)' : 'rgba(80,250,123,0.3)'}`, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <PackageCheck size={16} style={{ color: withUpdates.length > 0 ? 'var(--amber)' : 'var(--green)' }} />
-                <span style={{ fontWeight: 600, color: withUpdates.length > 0 ? 'var(--amber)' : 'var(--green)' }}>
-                  {withUpdates.length} container{withUpdates.length !== 1 ? 's' : ''} need updates
-                </span>
+        {/* ── Check History ── */}
+        <AdminSection title="Check History" icon={<Clock size={16} />}>
+          {history.length === 0 ? (
+            <p style={{ fontSize: 'var(--fs-sm)', color: 'var(--text3)' }}>No checks run yet.</p>
+          ) : (
+            <>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {(historyExpanded ? history : history.slice(0, 5)).map((h, i) => {
+                  const dur = h.durationMs < 60000
+                    ? `${Math.round(h.durationMs / 1000)}s`
+                    : `${Math.floor(h.durationMs / 60000)}m ${Math.round((h.durationMs % 60000) / 1000)}s`
+                  const date = new Date(h.startedAt)
+                  return (
+                    <div key={i} style={{
+                      display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+                      padding: '8px 12px', background: 'var(--bg2)', borderRadius: 'var(--radius)',
+                      border: `1px solid ${h.cancelled ? 'rgba(255,179,71,0.2)' : h.errors > 0 ? 'rgba(255,85,85,0.2)' : 'var(--border)'}`,
+                      fontSize: 'var(--fs-xs)',
+                    }}>
+                      <span style={{ color: h.cancelled ? 'var(--amber)' : h.errors > 0 ? 'var(--red)' : 'var(--green)', display: 'flex' }}>
+                        {h.cancelled || h.errors > 0 ? <AlertCircle size={13} /> : <CheckCircle size={13} />}
+                      </span>
+                      <span style={{ color: 'var(--text2)', fontFamily: 'var(--font-mono)', minWidth: 130 }}>
+                        {date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      <span style={{ color: 'var(--text3)' }}>
+                        <span style={{ color: 'var(--text2)', fontWeight: 600 }}>{h.checked}</span> checked
+                      </span>
+                      <span style={{ color: h.withUpdates > 0 ? 'var(--amber)' : 'var(--text3)' }}>
+                        <span style={{ fontWeight: 600 }}>{h.withUpdates}</span> with updates
+                      </span>
+                      {h.errors > 0 && <span style={{ color: 'var(--red)' }}>{h.errors} error{h.errors !== 1 ? 's' : ''}</span>}
+                      {h.cancelled && <span style={{ color: 'var(--amber)' }}>cancelled</span>}
+                      <div style={{ flex: 1 }} />
+                      <span style={{ color: 'var(--text3)', fontFamily: 'var(--font-mono)' }}>{dur}</span>
+                    </div>
+                  )
+                })}
               </div>
-              <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: 'var(--bg2)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                <CheckCircle size={16} style={{ color: 'var(--green)' }} />
-                <span style={{ color: 'var(--text2)' }}>{upToDate.length} up to date</span>
-              </div>
-              <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: 'var(--bg2)', border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>LXC containers only</span>
-            </div>
-          {errors.length > 0 && (
-                <div style={{ padding: '10px 16px', borderRadius: 'var(--radius-lg)', background: 'var(--red-dim)', border: '1px solid rgba(255,85,85,0.3)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <AlertCircle size={16} style={{ color: 'var(--red)' }} />
-                  <span style={{ color: 'var(--red)' }}>{errors.length} error{errors.length !== 1 ? 's' : ''}</span>
-                </div>
+              {history.length > 5 && (
+                <button
+                  onClick={() => setHistoryExpanded(e => !e)}
+                  style={{ marginTop: 8, fontSize: 'var(--fs-xs)', color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
+                >
+                  {historyExpanded ? 'Show less' : `Show all ${history.length} runs`}
+                </button>
               )}
-            </div>
-
-            {withUpdates.length > 0 && (
-              <>
-                {/* Bulk action bar */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16, padding: '10px 14px', background: 'var(--bg2)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)', flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>
-                    {selected.size} of {withUpdates.length} selected
-                  </span>
-                  <Btn size="xs" variant="ghost" onClick={selectAll}>Select all</Btn>
-                  <Btn size="xs" variant="ghost" onClick={selectNone}>None</Btn>
-                  <div style={{ flex: 1 }} />
-                  <Btn
-                    variant="accent" size="sm"
-                    onClick={runUpdates}
-                    disabled={selected.size === 0 || runAllStatus === 'running' || upgradingNow || checkingNow}
-                    loading={runAllStatus === 'running' || upgradingNow}
-                  >
-                    <Zap size={13} /> {checkingNow ? 'Check running...' : `Update ${selected.size > 0 ? selected.size : ''} selected`}
-                  </Btn>
-                </div>
-
-                {/* Containers grouped by host */}
-                {Object.entries(byHost).map(([hostName, containers]) => (
-                  <div key={hostName} style={{ marginBottom: 24 }}>
-                    <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                      {hostName}
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {containers.map(c => {
-                        const key = `${c.hostId}:${c.vmid}`
-                        const isSelected = selected.has(key)
-                        return (
-                          <div
-                            key={key}
-                            onClick={() => toggleSelect(key)}
-                            style={{
-                              padding: '12px 16px', borderRadius: 'var(--radius-lg)', cursor: 'pointer',
-                              background: isSelected ? 'var(--accent-dim)' : 'var(--bg1)',
-                              border: `1px solid ${isSelected ? 'var(--accent)' : 'rgba(255,179,71,0.2)'}`,
-                              display: 'flex', alignItems: 'center', gap: 12, transition: 'all 0.15s',
-                            }}
-                          >
-                            <div style={{
-                              width: 18, height: 18, borderRadius: 4, border: `2px solid ${isSelected ? 'var(--accent)' : 'var(--border-hi)'}`,
-                              background: isSelected ? 'var(--accent)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                            }}>
-                              {isSelected && <CheckCircle size={12} style={{ color: 'var(--bg0)' }} />}
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ fontWeight: 600, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)' }}>{c.name}</div>
-                              <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>#{c.vmid} · {c.node}</div>
-                            </div>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, justifyContent: 'flex-end', maxWidth: '60%' }}>
-                              {c.packages.slice(0, 8).map(pkg => (
-                                <span key={pkg} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', padding: '2px 6px', background: 'var(--amber-dim)', borderRadius: 4, color: 'var(--amber)' }}>
-                                  {pkg}
-                                </span>
-                              ))}
-                              {c.packages.length > 8 && (
-                                <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', padding: '2px 6px' }}>+{c.packages.length - 8} more</span>
-                              )}
-                            </div>
-                            <span style={{ fontSize: 'var(--fs-xs)', fontWeight: 700, color: 'var(--amber)', flexShrink: 0 }}>
-                              {c.packageCount} pkg{c.packageCount !== 1 ? 's' : ''}
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                ))}
-
-                {/* Output terminal */}
-                {runAllJobId && (
-                  <div style={{ marginTop: 24 }}>
-                    <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                      Update output {runAllStatus === 'running' ? '— running...' : '— done'}
-                    </div>
-                    <div
-                      ref={outputRef}
-                      style={{
-                        background: 'var(--bg0)', borderRadius: 'var(--radius)', border: '1px solid var(--border)',
-                        padding: 12, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)',
-                        height: 300, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all', lineHeight: 1.7,
-                      }}
-                    >
-                      {runAllLines.map((line, i) => <div key={i} style={{ color: 'var(--text2)' }}>{line}</div>)}
-                      {runAllStatus === 'running' && (
-                        <span style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                          <Loader size={10} style={{ animation: 'spin 1s linear infinite' }} /> running
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </>
-            )}
-
-            {withUpdates.length === 0 && !loading && (
-              <div style={{ textAlign: 'center', padding: '40px 0', color: 'var(--text3)' }}>
-                <CheckCircle size={48} style={{ marginBottom: 16, color: 'var(--green)', opacity: 0.5 }} />
-                <h2 style={{ fontSize: 'var(--fs-xl)', fontWeight: 600, color: 'var(--text2)', marginBottom: 8 }}>All up to date</h2>
-                <p>No containers have pending updates.</p>
-              </div>
-            )}
-          </>
-        )}
+            </>
+          )}
+        </AdminSection>
 
       </main>
     </div>
   )
 }
+
+
 
 export default function Root() {
   return (
@@ -2166,40 +1985,34 @@ export default function Root() {
 }
 
 function Router({ onLogout }) {
-  const getInitialPage = () => {
-    if (window.location.hash === '#/admin') return 'admin'
-    if (window.location.hash === '#/updates') return 'updates'
-    return 'main'
-  }
+  const getInitialPage = () => window.location.hash === '#/admin' ? 'admin' : 'main'
   const [page, setPage] = useState(getInitialPage)
   const [hosts, setHosts] = useState([])
-  const [updateCount, setUpdateCount] = useState(0)
+  const [updateCache, setUpdateCache] = useState({ containers: [] })
 
   useEffect(() => { applyTheme(loadSettings()) }, [])
   useEffect(() => {
     api.get('/api/hosts').then(res => { if (Array.isArray(res)) setHosts(res) })
-    // Load update count badge
-    api.get('/api/updates').then(res => {
-      if (res.containers) setUpdateCount(res.containers.filter(c => c.hasUpdates).length)
-    })
+    api.get('/api/updates').then(res => { if (res.containers) setUpdateCache(res) })
   }, [])
 
-  function goAdmin()   { window.location.hash = '#/admin';   setPage('admin') }
-  function goUpdates() { window.location.hash = '#/updates'; setPage('updates') }
-  function goMain()    { window.location.hash = '#/';        setPage('main') }
+  function goAdmin() { window.location.hash = '#/admin'; setPage('admin') }
+  function goMain()  { window.location.hash = '#/';      setPage('main') }
 
-  if (page === 'admin')   return <AdminPage onBack={goMain} onLogout={onLogout} hosts={hosts} />
-  if (page === 'updates') return <UpdatesPage onBack={goMain} onLogout={onLogout} />
-  return <App onLogout={onLogout} onAdmin={goAdmin} onUpdates={goUpdates} updateCount={updateCount} hosts={hosts} setHosts={setHosts} />
+  if (page === 'admin') return <AdminPage onBack={goMain} onLogout={onLogout} hosts={hosts} />
+  return <App onLogout={onLogout} onAdmin={goAdmin} hosts={hosts} setHosts={setHosts} updateCache={updateCache} setUpdateCache={setUpdateCache} />
 }
 
-function App({ onLogout, onAdmin, onUpdates, updateCount, hosts, setHosts }) {
+function App({ onLogout, onAdmin, hosts, setHosts, updateCache, setUpdateCache }) {
   const [showAdd, setShowAdd] = useState(false)
   const [toast, setToast] = useState(null)
   const [filter, setFilter] = useState('all')
   const [search, setSearch] = useState('')
   const [checkRunning, setCheckRunning] = useState(false)
+  const [checkProgress, setCheckProgress] = useState({ current: 0, total: 0 })
   const toastRef = useRef()
+
+  const updateCount = (updateCache?.containers || []).filter(c => c.hasUpdates).length
 
   function showToast(msg, type = 'info') {
     setToast({ msg, type })
@@ -2226,11 +2039,32 @@ function App({ onLogout, onAdmin, onUpdates, updateCount, hosts, setHosts }) {
 
   useEffect(() => {
     loadHosts()
-    const syncStatus = () => api.get('/api/scheduler/status').then(res => setCheckRunning(res.running))
+    const wasRunningRef = { current: false }
+    const syncStatus = async () => {
+      const res = await api.get('/api/scheduler/status')
+      setCheckRunning(res.running)
+      if (res.progress) setCheckProgress(res.progress)
+      if (!res.running && wasRunningRef.current) {
+        // check just finished — refresh update cache
+        api.get('/api/updates').then(r => { if (r.containers) setUpdateCache(r) })
+      }
+      wasRunningRef.current = res.running
+    }
     syncStatus()
-    const poll = setInterval(syncStatus, 5000)
+    const poll = setInterval(syncStatus, 2000)
     return () => clearInterval(poll)
   }, [])
+
+  async function triggerCheck() {
+    const res = await api.post('/api/scheduler/run-now')
+    if (res.busy) showToast('A check is already in progress', 'warn')
+    else showToast('Update check started', 'info')
+  }
+
+  async function cancelCheck() {
+    await api.cancel('/api/scheduler/run-now')
+    setCheckRunning(false)
+  }
 
   const toastColors = { success: 'var(--green)', error: 'var(--red)', warn: 'var(--amber)', info: 'var(--accent)' }
 
@@ -2265,35 +2099,34 @@ function App({ onLogout, onAdmin, onUpdates, updateCount, hosts, setHosts }) {
           </div>
 
           <div className="px-nav-filter" style={{ display: 'flex', gap: 4, background: 'var(--bg2)', borderRadius: 'var(--radius)', padding: 3 }}>
-            {['all', 'vm', 'lxc'].map(f => (
+            {['all', 'vm', 'lxc', 'updates'].map(f => (
               <button key={f} onClick={() => setFilter(f)} style={{
                 padding: '4px 12px', borderRadius: 6, fontSize: 'var(--fs-xs)', fontWeight: 500,
-                background: filter === f ? 'var(--bg3)' : 'transparent',
-                color: filter === f ? 'var(--text)' : 'var(--text3)',
+                background: filter === f ? (f === 'updates' ? 'var(--amber-dim)' : 'var(--bg3)') : 'transparent',
+                color: filter === f ? (f === 'updates' ? 'var(--amber)' : 'var(--text)') : 'var(--text3)',
                 cursor: 'pointer', border: 'none', textTransform: 'uppercase', letterSpacing: 0.5,
+                position: 'relative',
               }}>
-                {f === 'all' ? 'All' : f === 'vm' ? 'VMs' : 'LXCs'}
+                {f === 'all' ? 'All' : f === 'vm' ? 'VMs' : f === 'lxc' ? 'LXCs' : `Updates${updateCount > 0 ? ` (${updateCount})` : ''}`}
               </button>
             ))}
           </div>
 
           <div className="px-nav-actions" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <Btn variant="accent" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Host</Btn>
-            <div style={{ position: 'relative', display: 'inline-flex' }}>
-              <Btn variant="ghost" size="sm" onClick={onUpdates} title="Pending updates">
+            {checkRunning ? (
+              <>
+                <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontFamily: 'var(--font-mono)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <RefreshCw size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                  {checkProgress.total > 0 ? `${checkProgress.current}/${checkProgress.total}` : 'Checking...'}
+                </span>
+                <Btn variant="danger" size="xs" onClick={cancelCheck}><X size={12} /></Btn>
+              </>
+            ) : (
+              <Btn variant="ghost" size="sm" onClick={triggerCheck} title="Check for updates">
                 <PackageCheck size={14} />
               </Btn>
-              {updateCount > 0 && (
-                <span style={{
-                  position: 'absolute', top: -4, right: -4,
-                  background: 'var(--amber)', color: 'var(--bg0)',
-                  borderRadius: '50%', width: 16, height: 16,
-                  fontSize: 10, fontWeight: 700,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  pointerEvents: 'none',
-                }}>{updateCount > 9 ? '9+' : updateCount}</span>
-              )}
-            </div>
+            )}
             <Btn variant="ghost" size="sm" onClick={onAdmin} title="Admin"><Settings size={14} /></Btn>
             <Btn variant="ghost" onClick={onLogout} title="Sign out"><LogOut size={14} /></Btn>
           </div>
@@ -2311,7 +2144,7 @@ function App({ onLogout, onAdmin, onUpdates, updateCount, hosts, setHosts }) {
           </div>
         ) : (
           hosts.map(host => (
-            <HostPanel key={host.id} host={host} onDelete={deleteHost} onAction={doAction} filter={filter} search={search} checkRunning={checkRunning} />
+            <HostPanel key={host.id} host={host} onDelete={deleteHost} onAction={doAction} filter={filter} search={search} updateCache={updateCache} />
           ))
         )}
       </main>
