@@ -428,10 +428,11 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
         ref={exec.outputRef}
         onScroll={exec.onScroll}
         style={{
-          background: 'var(--bg0)', borderRadius: 'var(--radius)', border: '1px solid var(--border)',
+          background: 'var(--bg0)', borderRadius: 'var(--radius)',
+          border: `1px solid ${exec.status === 'done' ? (exec.exitCode === 0 ? 'rgba(80,250,123,0.3)' : 'rgba(255,85,85,0.3)') : 'var(--border)'}`,
           padding: 12, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)',
           height: 260, overflowY: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-          lineHeight: 1.7,
+          lineHeight: 1.7, transition: 'border-color 0.3s',
         }}
       >
         {busy && exec.lines.length === 0 && (
@@ -444,6 +445,18 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
           <span style={{ color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
             <Loader size={10} style={{ animation: 'spin 1s linear infinite' }} /> running
           </span>
+        )}
+        {exec.status === 'done' && (
+          <div style={{
+            marginTop: 8, paddingTop: 8, borderTop: `1px solid ${exec.exitCode === 0 ? 'rgba(80,250,123,0.2)' : 'rgba(255,85,85,0.2)'}`,
+            color: exec.exitCode === 0 ? 'var(--green)' : 'var(--red)',
+            display: 'flex', alignItems: 'center', gap: 6, fontWeight: 600,
+          }}>
+            {exec.exitCode === 0
+              ? <><CheckCircle size={13} /> Done</>
+              : <><AlertCircle size={13} /> Finished with errors (exit {exec.exitCode})</>
+            }
+          </div>
         )}
       </div>
 
