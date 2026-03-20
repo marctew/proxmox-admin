@@ -848,6 +848,33 @@ app.post('/api/hosts/:id/exec', async (req, res) => {
   sshStream(host, pctCmd, jobId, timeoutMs).then((exitCode) => {
     job.status = 'done'; job.exitCode = exitCode;
     broadcast(jobId, { type: 'done', exitCode });
+
+    // Push updated state to Home Assistant after apt-check or apt-upgrade
+    if (command === 'apt-check' || command === 'apt-upgrade') {
+      // For apt-check: parse the dry-run output and update this container's cache entry
+      if (command === 'apt-check') {
+        const packages = job.lines
+          .filter(l => l.v && l.v.startsWith('Inst '))
+          .map(l => l.v.split(' ')[1]?.trim())
+          .filter(Boolean);
+        const cache = loadUpdateCache();
+        const idx = cache.containers.findIndex(c => String(c.vmid) === String(vmid));
+        const entry = {
+          hostId: host.id, hostName: host.name, node, vmid,
+          name: cache.containers[idx]?.name || vmid,
+          packages, packageCount: packages.length,
+          hasUpdates: packages.length > 0,
+          checkedAt: new Date().toISOString(),
+        };
+        if (idx >= 0) cache.containers[idx] = entry;
+        else cache.containers.push(entry);
+        saveUpdateCache(cache);
+      }
+      // Push to HA with a slight delay to let cache settle
+      setTimeout(() => {
+        pushHaSensors(null, 'manual').catch(err => console.error('[ha] exec push error:', err.message));
+      }, 500);
+    }
   });
 });
 
