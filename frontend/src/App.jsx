@@ -5,7 +5,7 @@ import {
   Wifi, WifiOff, AlertCircle, CheckCircle, Clock, Settings, X, Eye,
   EyeOff, Zap, Monitor, Box, Activity, ExternalLink, Loader, Search, Tag, LogOut,
   Shield, Palette, Wrench, ChevronLeft, Save, Key, RefreshCw as Reset,
-  PackageCheck, Calendar, Home, Link, Unlink
+  PackageCheck, Calendar, Home, Link, Unlink, BarChart2
 } from 'lucide-react'
 
 // ── API helpers ──────────────────────────────────────────────────────────────
@@ -657,6 +657,128 @@ function PortsModal({ guest, hostId, onClose }) {
   )
 }
 
+
+// ── Mini sparkline graph ──────────────────────────────────────────────────────
+
+function MiniGraph({ data, valueKey, maxKey, color, label, format }) {
+  if (!data || data.length === 0) return null
+  const valid = data.filter(d => d[valueKey] != null && !isNaN(d[valueKey]))
+  if (valid.length === 0) return null
+
+  const values = valid.map(d => maxKey ? (d[valueKey] / d[maxKey]) * 100 : d[valueKey])
+  const max = Math.max(...values, 0.001)
+  const latest = values[values.length - 1]
+
+  const w = 160, h = 40, pad = 2
+  const pts = values.map((v, i) => {
+    const x = pad + (i / (values.length - 1)) * (w - pad * 2)
+    const y = pad + (1 - v / max) * (h - pad * 2)
+    return `${x},${y}`
+  }).join(' ')
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)' }}>{label}</span>
+        <span style={{ fontSize: 'var(--fs-xs)', color, fontWeight: 600 }}>{format(latest, valid[valid.length - 1])}</span>
+      </div>
+      <svg width={w} height={h} style={{ display: 'block' }}>
+        <defs>
+          <linearGradient id={`grad-${label}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={color} stopOpacity="0.3" />
+            <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+          </linearGradient>
+        </defs>
+        {/* Fill area */}
+        <polygon
+          points={`${pad},${h - pad} ${pts} ${w - pad},${h - pad}`}
+          fill={`url(#grad-${label})`}
+        />
+        {/* Line */}
+        <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round" />
+        {/* Latest dot */}
+        {values.length > 0 && (() => {
+          const lx = pad + ((values.length - 1) / (values.length - 1)) * (w - pad * 2)
+          const ly = pad + (1 - values[values.length - 1] / max) * (h - pad * 2)
+          return <circle cx={lx} cy={ly} r="2.5" fill={color} />
+        })()}
+      </svg>
+    </div>
+  )
+}
+
+function GuestGraphs({ guest, hostId }) {
+  const [rrd, setRrd] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [timeframe, setTimeframe] = useState('hour')
+  const [error, setError] = useState(null)
+
+  async function load(tf) {
+    setLoading(true); setError(null)
+    const res = await api.get(`/api/hosts/${hostId}/rrd?node=${guest.node}&vmid=${guest.vmid}&type=${guest.type}&timeframe=${tf}`)
+    setLoading(false)
+    if (res.ok) setRrd(res.data)
+    else setError(res.error || 'Failed to load graph data')
+  }
+
+  useEffect(() => { load(timeframe) }, [timeframe])
+
+  function fmtPct(v) { return `${v.toFixed(1)}%` }
+  function fmtBytes(v) {
+    if (v > 1073741824) return `${(v / 1073741824).toFixed(1)} GB`
+    if (v > 1048576) return `${(v / 1048576).toFixed(1)} MB`
+    if (v > 1024) return `${(v / 1024).toFixed(0)} KB`
+    return `${v.toFixed(0)} B`
+  }
+  function fmtNet(v, d) { return `↑${fmtBytes(d?.netout || 0)}/s ↓${fmtBytes(d?.netin || 0)}/s` }
+  function fmtMem(v, d) { return `${fmtBytes(d?.mem || 0)} / ${fmtBytes(d?.maxmem || 0)}` }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {/* Timeframe picker */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <BarChart2 size={12} style={{ color: 'var(--accent)' }} />
+          <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: 0.5 }}>Resource history</span>
+        </div>
+        <div style={{ display: 'flex', gap: 2, background: 'var(--bg3)', borderRadius: 6, padding: 2 }}>
+          {['hour', 'day', 'week'].map(tf => (
+            <button key={tf} onClick={() => setTimeframe(tf)} style={{
+              padding: '2px 8px', borderRadius: 4, fontSize: 'var(--fs-xs)', border: 'none', cursor: 'pointer',
+              background: timeframe === tf ? 'var(--bg1)' : 'transparent',
+              color: timeframe === tf ? 'var(--text)' : 'var(--text3)',
+              fontWeight: timeframe === tf ? 600 : 400,
+            }}>
+              {tf === 'hour' ? '1h' : tf === 'day' ? '24h' : '7d'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading && (
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '16px 0', color: 'var(--text3)' }}>
+          <Loader size={14} style={{ animation: 'spin 1s linear infinite' }} />
+        </div>
+      )}
+
+      {error && (
+        <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--red)', padding: '8px 0' }}>{error}</div>
+      )}
+
+      {!loading && rrd && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 16 }}>
+          <MiniGraph data={rrd} valueKey="cpu" maxKey="maxcpu" color="var(--blue)"
+            label="CPU" format={(v) => fmtPct(v)} />
+          <MiniGraph data={rrd} valueKey="mem" maxKey="maxmem" color="var(--purple)"
+            label="Memory" format={(v, d) => fmtMem(v, d)} />
+          <MiniGraph data={rrd} valueKey="netout" color="var(--green)"
+            label="Network" format={(v, d) => fmtNet(v, d)} />
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── VM / LXC Card ────────────────────────────────────────────────────────────
 
 function GuestCard({ guest, hostId, onAction, updatePending, cachedPackages, onCacheCleared }) {
@@ -832,6 +954,8 @@ function GuestCard({ guest, hostId, onAction, updatePending, cachedPackages, onC
               <Bar value={0} max={1} color="var(--green)" />
             </div>
           </div>
+
+          {running && <GuestGraphs guest={guest} hostId={hostId} />}
 
           <div style={{ marginTop: 16, padding: '10px 12px', background: 'var(--bg2)', borderRadius: 'var(--radius)', fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)', color: 'var(--text2)', display: 'flex', flexWrap: 'wrap', gap: '6px 20px' }}>
             <span>Node: <span style={{ color: 'var(--accent)' }}>{guest.node}</span></span>

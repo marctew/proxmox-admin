@@ -900,6 +900,37 @@ app.get('/api/jobs/:jobId', (req, res) => {
   res.json(job);
 });
 
+// ── RRD data for graphs ──────────────────────────────────────────────────────
+// timeframe: hour | day | week | month | year
+// type: lxc | qemu | node
+
+app.get('/api/hosts/:id/rrd', async (req, res) => {
+  const { node, vmid, type, timeframe = 'hour' } = req.query;
+  const config = loadConfig();
+  const host = config.hosts.find(h => h.id === req.params.id);
+  if (!host) return res.status(404).json({ error: 'Host not found' });
+
+  const validTimeframes = ['hour', 'day', 'week', 'month', 'year'];
+  if (!validTimeframes.includes(timeframe)) return res.status(400).json({ error: 'Invalid timeframe' });
+
+  try {
+    let endpoint;
+    if (type === 'node') {
+      endpoint = `/nodes/${node}/rrddata?timeframe=${timeframe}&cf=AVERAGE`;
+    } else if (type === 'lxc') {
+      endpoint = `/nodes/${node}/lxc/${vmid}/rrddata?timeframe=${timeframe}&cf=AVERAGE`;
+    } else if (type === 'qemu' || type === 'vm') {
+      endpoint = `/nodes/${node}/qemu/${vmid}/rrddata?timeframe=${timeframe}&cf=AVERAGE`;
+    } else {
+      return res.status(400).json({ error: 'Invalid type' });
+    }
+    const data = await proxmoxGet(host, endpoint);
+    res.json({ ok: true, data });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 server.listen(PORT, () => console.log(`Proxmox Admin running on :${PORT}`));
