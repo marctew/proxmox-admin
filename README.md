@@ -27,6 +27,12 @@ A self-hosted web UI for managing Proxmox VE hosts, LXC containers and VMs — w
 - Per-host sensors: `proxmoxadminpanel_{hostname}_containers_with_updates`, `_containers_checked`, `_last_check`
 - Global sensors: `proxmoxadminpanel_total_containers_with_updates`, `_total_containers_checked`, `_last_check`, `_last_check_trigger`, `_last_check_outcome`, `_last_check_duration_seconds`
 
+**Resource Graphs**
+- Live sparkline graphs for CPU, memory and network on every running guest
+- 1h / 24h / 7d timeframes
+- Loads on demand when you expand a guest card
+- Responsive — stacks vertically on mobile
+
 **Security**
 - Passphrase + TOTP (2FA) authentication with brute-force lockout
 - Hostname confirmation required to delete a host
