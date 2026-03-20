@@ -285,7 +285,7 @@ let checkCancelled = false; // set to true to abort in-flight check
 const activeCheckConns = new Set(); // SSH connections for current check — killed on cancel
 let currentCheckTrigger = 'scheduled'; // 'scheduled' or 'manual'
 
-const APT_CHECK_CMD = 'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null';
+const APT_CHECK_CMD = 'apt-get update -qq 2>&1 && apt-get upgrade --dry-run 2>/dev/null';
 
 async function runUpdateCheck() {
   // Note: checkRunning must be set to true by caller before invoking this function
@@ -326,8 +326,8 @@ async function runUpdateCheck() {
 
             const packages = output
               .split('\n')
-              .filter(l => l.includes('upgradable') && !l.startsWith('Listing'))
-              .map(l => l.split('/')[0].trim())
+              .filter(l => l.startsWith('Inst '))
+              .map(l => l.split(' ')[1].trim())
               .filter(Boolean);
 
             results.push({
@@ -820,7 +820,7 @@ app.post('/api/hosts/:id/exec', async (req, res) => {
   const allowed = ['apt-check', 'apt-upgrade', 'apt-autoremove', 'enable-root-ssh'];
   if (!allowed.includes(command)) return res.status(400).json({ error: 'Command not permitted' });
   const cmds = {
-    'apt-check':       'apt-get update -qq 2>&1 && apt list --upgradable 2>/dev/null',
+    'apt-check':       'apt-get update -qq 2>&1 && apt-get upgrade --dry-run 2>/dev/null',
     'apt-upgrade':     'DEBIAN_FRONTEND=noninteractive apt-get upgrade -y 2>&1',
     'apt-autoremove':  'DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1',
     'enable-root-ssh': 'sed -i \'s/^#*\s*PermitRootLogin.*/PermitRootLogin yes/\' /etc/ssh/sshd_config && grep -q \'PermitRootLogin yes\' /etc/ssh/sshd_config || echo \'PermitRootLogin yes\' >> /etc/ssh/sshd_config && (systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || systemctl restart sshd 2>/dev/null) && echo \'Done — root SSH enabled\'',

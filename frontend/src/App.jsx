@@ -358,8 +358,8 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
   const exec = useExecJob(hostId, guest)
 
   const upgradable = exec.lines
-    .filter(l => l.v && l.v.includes('upgradable'))
-    .map(l => l.v.split('/')[0].trim())
+    .filter(l => l.v && l.v.startsWith('Inst '))
+    .map(l => l.v.split(' ')[1]?.trim())
     .filter(Boolean)
 
   const busy = exec.status === 'running'
