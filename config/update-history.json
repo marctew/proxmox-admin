@@ -1,5 +1,14 @@
 [
   {
+    "startedAt": "2026-03-20T18:46:48.627Z",
+    "finishedAt": "2026-03-20T18:51:30.383Z",
+    "durationMs": 281758,
+    "checked": 41,
+    "withUpdates": 7,
+    "errors": 0,
+    "cancelled": false
+  },
+  {
     "startedAt": "2026-03-20T18:29:58.180Z",
     "finishedAt": "2026-03-20T18:35:12.478Z",
     "durationMs": 314299,

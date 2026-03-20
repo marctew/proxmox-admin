@@ -572,6 +572,20 @@ app.get('/api/updates/history', (req, res) => {
   res.json(loadHistory());
 });
 
+// Clear a single container from the update cache (called after successful upgrade)
+app.post('/api/updates/clear-container', (req, res) => {
+  const { vmid } = req.body;
+  if (!vmid) return res.status(400).json({ error: 'vmid required' });
+  const cache = loadUpdateCache();
+  cache.containers = cache.containers.map(c =>
+    String(c.vmid) === String(vmid)
+      ? { ...c, hasUpdates: false, packages: [], packageCount: 0 }
+      : c
+  );
+  saveUpdateCache(cache);
+  res.json({ ok: true });
+});
+
 // ════════════════════════════════════════════════════════════════════════════
 // UPDATE-ALL ROUTE
 // Runs apt-upgrade sequentially or with concurrency limit

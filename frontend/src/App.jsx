@@ -354,26 +354,48 @@ function useExecJob(hostId, guest) {
   return { lines, status, exitCode, run, reconnect, outputRef, onScroll }
 }
 
-function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
+function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart, cachedPackages, onCacheCleared }) {
   const exec = useExecJob(hostId, guest)
+  // Show cached packages until a fresh check runs, then switch to live results
+  const [usedCache, setUsedCache] = useState(!activeJob)
 
-  const upgradable = exec.lines
-    .filter(l => l.v && l.v.startsWith('Inst '))
-    .map(l => l.v.split(' ')[1]?.trim())
-    .filter(Boolean)
+  const upgradable = usedCache
+    ? (cachedPackages || [])
+    : exec.lines
+        .filter(l => l.v && l.v.startsWith('Inst '))
+        .map(l => l.v.split(' ')[1]?.trim())
+        .filter(Boolean)
 
   const busy = exec.status === 'running'
 
   useEffect(() => {
     if (activeJob) {
+      setUsedCache(false)
       exec.reconnect(activeJob)
-    } else {
-      exec.run('apt-check', onJobStart)
     }
+    // Don't run apt-check automatically anymore — show cache instead
   }, [])
 
-  function startCommand(command) {
-    exec.run(command, onJobStart)
+  async function startCommand(command) {
+    setUsedCache(false) // switch to live output
+    const jId = await exec.run(command, onJobStart)
+    // After a successful upgrade, clear this container from the cache
+    if (command === 'apt-upgrade' && jId) {
+      const pollDone = setInterval(async () => {
+        const job = await fetch(`/api/jobs/${jId}`).then(r => r.json())
+        if (job.status === 'done') {
+          clearInterval(pollDone)
+          if (job.exitCode === 0) {
+            await fetch('/api/updates/clear-container', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ vmid: guest.vmid }),
+            })
+            if (onCacheCleared) onCacheCleared(guest.vmid)
+          }
+        }
+      }, 2000)
+    }
   }
 
   const lineColor = { line: 'var(--text2)', stderr: 'var(--amber)', error: 'var(--red)' }
@@ -385,7 +407,7 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
           <Btn variant="ghost" size="xs" onClick={() => startCommand('apt-check')} disabled={busy}>
             <RefreshCw size={12} /> Refresh
           </Btn>
-          {upgradable.length > 0 && exec.status === 'done' && (
+          {upgradable.length > 0 && (exec.status === 'done' || usedCache) && (
             <Btn variant="accent" size="xs" onClick={() => startCommand('apt-upgrade')} disabled={busy}>
               <Zap size={12} /> Upgrade All
             </Btn>
@@ -396,7 +418,7 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
         </div>
       }
     >
-      {exec.status === 'done' && (
+      {(exec.status === 'done' || usedCache) && (
         <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
           {upgradable.length > 0 ? (
             <span style={{ padding: '4px 12px', borderRadius: 20, background: 'var(--amber-dim)', color: 'var(--amber)', fontSize: 'var(--fs-xs)', fontWeight: 600 }}>
@@ -406,6 +428,9 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
             <span style={{ padding: '4px 12px', borderRadius: 20, background: 'var(--green-dim)', color: 'var(--green)', fontSize: 'var(--fs-xs)', fontWeight: 600 }}>
               Up to date
             </span>
+          )}
+          {usedCache && (
+            <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--text3)', fontStyle: 'italic' }}>from last check</span>
           )}
           {exec.exitCode !== 0 && exec.exitCode !== null && (
             <span style={{ fontSize: 'var(--fs-xs)', color: 'var(--red)' }}>exit {exec.exitCode}</span>
@@ -435,7 +460,14 @@ function UpdatesModal({ guest, hostId, onClose, activeJob, onJobStart }) {
           lineHeight: 1.7, transition: 'border-color 0.3s',
         }}
       >
-        {busy && exec.lines.length === 0 && (
+        {usedCache && exec.lines.length === 0 && (
+          <div style={{ color: 'var(--text3)', fontStyle: 'italic' }}>
+            {upgradable.length > 0
+              ? `${upgradable.length} package${upgradable.length !== 1 ? 's' : ''} pending from last check. Hit Refresh to re-check or Upgrade All to install.`
+              : 'No updates pending as of last check. Hit Refresh to re-check.'}
+          </div>
+        )}
+        {!usedCache && busy && exec.lines.length === 0 && (
           <span style={{ color: 'var(--accent)' }}>Connecting...</span>
         )}
         {exec.lines.map((l, i) => (
@@ -627,7 +659,7 @@ function PortsModal({ guest, hostId, onClose }) {
 
 // ── VM / LXC Card ────────────────────────────────────────────────────────────
 
-function GuestCard({ guest, hostId, onAction, updatePending }) {
+function GuestCard({ guest, hostId, onAction, updatePending, cachedPackages, onCacheCleared }) {
   const [expanded, setExpanded] = useState(false)
   const [actionLoading, setActionLoading] = useState(null)
   const [showUpdates, setShowUpdates] = useState(false)
@@ -767,7 +799,9 @@ function GuestCard({ guest, hostId, onAction, updatePending }) {
       {showUpdates && <UpdatesModal guest={guest} hostId={hostId}
         onClose={(jobDone) => { setShowUpdates(false); if (jobDone) setActiveJobId(null) }}
         activeJob={activeJobId}
-        onJobStart={(jId) => setActiveJobId(jId)} />}
+        onJobStart={(jId) => setActiveJobId(jId)}
+        cachedPackages={cachedPackages}
+        onCacheCleared={onCacheCleared} />}
 
       {/* Expanded details */}
       {expanded && (
@@ -875,7 +909,7 @@ function tagColour(tag) {
 
 // ── Tag Group ────────────────────────────────────────────────────────────────
 
-function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, updateVmids }) {
+function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, updateVmids, updateCache, onCacheCleared }) {
   const [collapsed, setCollapsed] = useState(true)
 
   // Sync with external collapse/expand all — only when prop changes
@@ -982,9 +1016,15 @@ function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, upda
               {stoppedGuests.length} stopped — click to show
             </div>
           )}
-          {visibleGuests.map(g => (
-            <GuestCard key={`${g.type}-${g.vmid}`} guest={g} hostId={hostId} onAction={onAction} updatePending={updateVmids?.has(String(g.vmid))} />
-          ))}
+          {visibleGuests.map(g => {
+            const cached = (updateCache?.containers || []).find(c => String(c.vmid) === String(g.vmid))
+            return (
+              <GuestCard key={`${g.type}-${g.vmid}`} guest={g} hostId={hostId} onAction={onAction}
+                updatePending={updateVmids?.has(String(g.vmid))}
+                cachedPackages={cached?.packages || []}
+                onCacheCleared={onCacheCleared} />
+            )
+          })}
         </div>
       )}
     </div>
@@ -993,7 +1033,7 @@ function TagGroup({ tag, guests, hostId, onAction, hideHeader, collapseAll, upda
 
 // ── Node section ──────────────────────────────────────────────────────────────
 
-function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, updateCache }) {
+function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, updateCache, onCacheCleared }) {
   const ns = nodeData.nodeStatus || {}
   const cpuPct = ns.cpu ? Math.round(ns.cpu * 100) : 0
   const memPct = pct(ns.memory?.used, ns.memory?.total)
@@ -1046,6 +1086,8 @@ function NodeSection({ nodeData, hostId, onAction, filter, search, collapseAll, 
             hideHeader={singleUntaggedGroup}
             collapseAll={collapseAll}
             updateVmids={updateVmids}
+            updateCache={updateCache}
+            onCacheCleared={onCacheCleared}
           />
         ))}
       </div>
@@ -1097,7 +1139,7 @@ function DeleteHostModal({ host, onClose, onConfirm }) {
 
 const REFRESH_INTERVAL = 30000
 
-function HostPanel({ host, onDelete, onAction, filter, search, updateCache }) {
+function HostPanel({ host, onDelete, onAction, filter, search, updateCache, onCacheCleared }) {
   // Load cached scan data immediately so cards show on mount
   const cached = loadScanCache(host.id)
   const [scanData, setScanData] = useState(cached?.nodes || null)
@@ -1227,7 +1269,7 @@ function HostPanel({ host, onDelete, onAction, filter, search, updateCache }) {
       )}
 
       {scanData && scanData.map(node => (
-        <NodeSection key={node.node} nodeData={node} hostId={host.id} onAction={onAction} filter={filter} search={search} collapseAll={collapseAll} updateCache={updateCache} />
+        <NodeSection key={node.node} nodeData={node} hostId={host.id} onAction={onAction} filter={filter} search={search} collapseAll={collapseAll} updateCache={updateCache} onCacheCleared={onCacheCleared} />
       ))}
     </div>
   )
@@ -2271,7 +2313,12 @@ function App({ onLogout, onAdmin, hosts, setHosts, updateCache, setUpdateCache }
           </div>
         ) : (
           hosts.map(host => (
-            <HostPanel key={host.id} host={host} onDelete={deleteHost} onAction={doAction} filter={filter} search={search} updateCache={updateCache} />
+            <HostPanel key={host.id} host={host} onDelete={deleteHost} onAction={doAction} filter={filter} search={search} updateCache={updateCache} onCacheCleared={(vmid) => {
+              setUpdateCache(prev => ({
+                ...prev,
+                containers: prev.containers.map(c => String(c.vmid) === String(vmid) ? { ...c, hasUpdates: false, packages: [], packageCount: 0 } : c)
+              }))
+            }} />
           ))
         )}
       </main>
