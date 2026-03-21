@@ -62,7 +62,7 @@ if [[ "$UPDATE_ONLY" == true ]]; then
 
   # Detach the "up -d" so it survives the backend container being recreated
   info "Starting containers in background..."
-  nohup sh -c "sleep 2 && cd '$INSTALL_DIR' && $COMPOSE up -d && nohup bash '$INSTALL_DIR/updater.sh' >> '$INSTALL_DIR/config/update.log' 2>&1 &" > /dev/null 2>&1 &
+  nohup sh -c "sleep 2 && cd '$INSTALL_DIR' && $COMPOSE down && $COMPOSE up -d && nohup bash '$INSTALL_DIR/updater.sh' >> '$INSTALL_DIR/config/update.log' 2>&1 &" > /dev/null 2>&1 &
 
   heading "Update complete"
   LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')

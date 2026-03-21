@@ -986,20 +986,15 @@ app.get('/api/version', async (req, res) => {
 
 // ── Self-update ───────────────────────────────────────────────────────────────
 
-let updateInProgress = false;
-
 app.post('/api/update', (req, res) => {
-  if (updateInProgress) return res.status(409).json({ ok: false, error: 'Update already in progress' });
-  updateInProgress = true;
-  res.json({ ok: true, message: 'Update started — panel will restart automatically' });
-
-  console.log('[update] Starting self-update...');
-
-  // Run as detached process so it survives the container restart
   const installDir = process.env.INSTALL_DIR || '/opt/proxmox-admin';
   const flagFile = `${installDir}/config/.update-requested`;
-  // Write flag file — host-side updater.sh watcher picks this up and runs install.sh
+  // Use flag file as the lock — persists across restarts, visible to all instances/tabs
+  if (fs.existsSync(flagFile)) {
+    return res.status(409).json({ ok: false, error: 'Update already in progress' });
+  }
   fs.writeFileSync(flagFile, new Date().toISOString());
+  res.json({ ok: true, message: 'Update started — panel will restart automatically' });
   console.log('[update] Update flag written — host watcher will handle rebuild');
 });
 
