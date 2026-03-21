@@ -6,12 +6,12 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
-      # Set this to a long random string and keep it fixed.
-      # If left blank, sessions are invalidated on every container restart.
-      # Generate one with: openssl rand -hex 32
       - SESSION_SECRET=${SESSION_SECRET:-}
+      - INSTALL_DIR=/opt/proxmox-admin
     volumes:
       - ./config:/app/config
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /opt/proxmox-admin:/opt/proxmox-admin
     networks:
       - proxmox-admin
 

@@ -14,6 +14,7 @@ const bcrypt = require('bcrypt');
 const { Client: SSHClient } = require('ssh2');
 const { WebSocketServer } = require('ws');
 const cron = require('node-cron');
+const { spawn } = require('child_process');
 
 const app = express();
 const server = http.createServer(app);
@@ -981,6 +982,34 @@ async function fetchLatestVersion() {
 app.get('/api/version', async (req, res) => {
   const latest = await fetchLatestVersion();
   res.json({ current: CURRENT_VERSION, latest, updateAvailable: latest && latest !== CURRENT_VERSION });
+});
+
+// ── Self-update ───────────────────────────────────────────────────────────────
+
+let updateInProgress = false;
+
+app.post('/api/update', (req, res) => {
+  if (updateInProgress) return res.status(409).json({ ok: false, error: 'Update already in progress' });
+  updateInProgress = true;
+  res.json({ ok: true, message: 'Update started — panel will restart automatically' });
+
+  console.log('[update] Starting self-update...');
+
+  // Run as detached process so it survives the container restart
+  const installDir = process.env.INSTALL_DIR || '/opt/proxmox-admin';
+  const flagFile = `${installDir}/config/.update-requested`;
+  // Write flag file — host-side updater.sh watcher picks this up and runs install.sh
+  fs.writeFileSync(flagFile, new Date().toISOString());
+  console.log('[update] Update flag written — host watcher will handle rebuild');
+});
+
+app.get('/api/update/log', (req, res) => {
+  const installDir = process.env.INSTALL_DIR || '/opt/proxmox-admin';
+  const logFile = `${installDir}/config/update.log`;
+  try {
+    const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : 'No log yet';
+    res.json({ ok: true, log });
+  } catch (err) { res.json({ ok: false, error: err.message }); }
 });
 
 app.get('/health', (req, res) => res.json({ ok: true }));

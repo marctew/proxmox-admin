@@ -59,11 +59,14 @@ if [[ "$UPDATE_ONLY" == true ]]; then
 
   heading "Rebuilding containers (no cache)"
   $COMPOSE build --no-cache
-  $COMPOSE up -d
+
+  # Detach the "up -d" so it survives the backend container being recreated
+  info "Starting containers in background..."
+  nohup sh -c "sleep 2 && cd '$INSTALL_DIR' && $COMPOSE up -d && pkill -f updater.sh; nohup bash '$INSTALL_DIR/updater.sh' >> '$INSTALL_DIR/config/update.log' 2>&1 &" > /dev/null 2>&1 &
 
   heading "Update complete"
   LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
-  echo -e "\n  ${GREEN}Updated and running at:${NC} ${YELLOW}http://${LAN_IP:-YOUR-SERVER-IP}:${PORT}${NC}\n"
+  echo -e "\n  ${GREEN}Containers starting — panel back shortly at:${NC} ${YELLOW}http://${LAN_IP:-YOUR-SERVER-IP}:${PORT}${NC}\n"
   exit 0
 fi
 
@@ -158,7 +161,18 @@ heading "Building and starting containers"
 COMPOSE=$(get_compose)
 $COMPOSE up -d --build
 
-# ── 5. Done ───────────────────────────────────────────────────────────────────
+# ── 5. Start host-side update watcher ────────────────────────────────────────
+
+heading "Starting update watcher"
+
+# Kill any existing watcher
+pkill -f "updater.sh" 2>/dev/null || true
+
+# Start watcher in background
+nohup bash "$INSTALL_DIR/updater.sh" > /dev/null 2>&1 &
+info "Update watcher started (pid $!)"
+
+# ── 6. Done ───────────────────────────────────────────────────────────────────
 heading "Installation complete"
 
 LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')

@@ -1830,6 +1830,8 @@ function AdminPage({ onBack, onLogout, hosts, versionInfo }) {
   const [checkRunning, setCheckRunning] = useState(false)
   const [history, setHistory] = useState([])
   const [historyExpanded, setHistoryExpanded] = useState(false)
+  const [updating, setUpdating] = useState(false)
+  const [updateMsg, setUpdateMsg] = useState(null)
   const checkPollRef = useRef(null)
 
   useEffect(() => {
@@ -1841,6 +1843,41 @@ function AdminPage({ onBack, onLogout, hosts, versionInfo }) {
     const statusPoll = setInterval(syncStatus, 5000)
     return () => { clearInterval(checkPollRef.current); clearInterval(statusPoll) }
   }, [])
+
+  async function triggerUpdate() {
+    setUpdating(true)
+    setUpdateMsg('Update started — pulling latest code and rebuilding. The panel will go offline briefly...')
+    await api.post('/api/update').catch(() => {})
+
+    // Wait for panel to go offline first (up to 30s), then poll for it to come back
+    const start = Date.now()
+    let wentOffline = false
+
+    const poll = setInterval(async () => {
+      if (Date.now() - start > 5 * 60 * 1000) {
+        clearInterval(poll)
+        setUpdateMsg('Update timed out — check server logs')
+        setUpdating(false)
+        return
+      }
+      try {
+        await fetch('/health', { cache: 'no-store' })
+        if (wentOffline) {
+          // Panel is back up!
+          clearInterval(poll)
+          setUpdateMsg('Update complete — reloading...')
+          setTimeout(() => window.location.reload(), 1500)
+        }
+        // else still online — waiting to go offline
+      } catch {
+        // Panel is offline — good, update is in progress
+        if (!wentOffline) {
+          wentOffline = true
+          setUpdateMsg('Rebuilding containers... this takes a minute or two')
+        }
+      }
+    }, 2000)
+  }
 
   async function triggerCheckNow() {
     // Always ask the server — it's the single source of truth across all windows
@@ -1961,14 +1998,28 @@ function AdminPage({ onBack, onLogout, hosts, versionInfo }) {
 
       <main className="px-admin-content" style={{ flex: 1, padding: '32px 24px', maxWidth: 860, margin: '0 auto', width: '100%' }}>
 
-        {versionInfo?.updateAvailable && (
-          <div style={{ marginBottom: 20, padding: '12px 16px', borderRadius: 'var(--radius)', background: 'var(--accent-dim)', border: '1px solid var(--accent)', display: 'flex', alignItems: 'center', gap: 10, fontSize: 'var(--fs-sm)' }}>
-            <span style={{ color: 'var(--accent)' }}>⬆</span>
-            <span>Update available — <strong>v{versionInfo.latest}</strong> (current: v{versionInfo.current})</span>
-            <a href="https://github.com/marctew/proxmox-admin/releases" target="_blank" rel="noreferrer"
-              style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 'var(--fs-xs)' }}>
-              View changelog →
-            </a>
+        {(versionInfo?.updateAvailable || updating) && (
+          <div style={{ marginBottom: 20, padding: '12px 16px', borderRadius: 'var(--radius)', background: 'var(--accent-dim)', border: '1px solid var(--accent)', display: 'flex', alignItems: 'center', gap: 10, fontSize: 'var(--fs-sm)', flexWrap: 'wrap' }}>
+            {updating ? (
+              <>
+                <Loader size={14} style={{ color: 'var(--accent)', animation: 'spin 1s linear infinite', flexShrink: 0 }} />
+                <span style={{ color: 'var(--text2)' }}>{updateMsg}</span>
+              </>
+            ) : (
+              <>
+                <span style={{ color: 'var(--accent)' }}>⬆</span>
+                <span>Update available — <strong>v{versionInfo.latest}</strong> (current: v{versionInfo.current})</span>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <a href="https://github.com/marctew/proxmox-admin/releases" target="_blank" rel="noreferrer"
+                    style={{ color: 'var(--accent)', fontSize: 'var(--fs-xs)' }}>
+                    Changelog →
+                  </a>
+                  <Btn variant="accent" size="xs" onClick={triggerUpdate}>
+                    <RefreshCw size={12} /> Update now
+                  </Btn>
+                </div>
+              </>
+            )}
           </div>
         )}
 
