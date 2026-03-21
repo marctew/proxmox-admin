@@ -62,7 +62,7 @@ if [[ "$UPDATE_ONLY" == true ]]; then
 
   # Detach the "up -d" so it survives the backend container being recreated
   info "Starting containers in background..."
-  nohup sh -c "sleep 2 && cd '$INSTALL_DIR' && $COMPOSE up -d && pkill -f updater.sh; nohup bash '$INSTALL_DIR/updater.sh' >> '$INSTALL_DIR/config/update.log' 2>&1 &" > /dev/null 2>&1 &
+  nohup sh -c "sleep 2 && cd '$INSTALL_DIR' && $COMPOSE up -d && nohup bash '$INSTALL_DIR/updater.sh' >> '$INSTALL_DIR/config/update.log' 2>&1 &" > /dev/null 2>&1 &
 
   heading "Update complete"
   LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')
@@ -165,12 +165,17 @@ $COMPOSE up -d --build
 
 heading "Starting update watcher"
 
-# Kill any existing watcher
+# Kill any existing watcher and start fresh
 pkill -f "updater.sh" 2>/dev/null || true
-
-# Start watcher in background
-nohup bash "$INSTALL_DIR/updater.sh" > /dev/null 2>&1 &
+sleep 1
+nohup bash "$INSTALL_DIR/updater.sh" >> "$INSTALL_DIR/config/update.log" 2>&1 &
 info "Update watcher started (pid $!)"
+
+# Register in crontab so it survives reboots
+if ! crontab -l 2>/dev/null | grep -q "updater.sh"; then
+  (crontab -l 2>/dev/null; echo "@reboot nohup bash $INSTALL_DIR/updater.sh >> $INSTALL_DIR/config/update.log 2>&1 &") | crontab -
+  info "Update watcher registered in crontab"
+fi
 
 # ── 6. Done ───────────────────────────────────────────────────────────────────
 heading "Installation complete"
