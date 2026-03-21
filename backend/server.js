@@ -958,6 +958,31 @@ app.get('/api/hosts/:id/rrd', async (req, res) => {
   }
 });
 
+// ── Version check ────────────────────────────────────────────────────────────
+
+const CURRENT_VERSION = require('./package.json').version;
+const GITHUB_VERSION_URL = 'https://raw.githubusercontent.com/marctew/proxmox-admin/main/backend/package.json';
+let versionCache = { latest: null, checkedAt: null };
+
+async function fetchLatestVersion() {
+  // Cache for 1 hour
+  if (versionCache.latest && versionCache.checkedAt && Date.now() - versionCache.checkedAt < 3600000) {
+    return versionCache.latest;
+  }
+  try {
+    const res = await axios.get(GITHUB_VERSION_URL, { timeout: 8000 });
+    versionCache = { latest: res.data?.version || null, checkedAt: Date.now() };
+    return versionCache.latest;
+  } catch {
+    return null;
+  }
+}
+
+app.get('/api/version', async (req, res) => {
+  const latest = await fetchLatestVersion();
+  res.json({ current: CURRENT_VERSION, latest, updateAvailable: latest && latest !== CURRENT_VERSION });
+});
+
 app.get('/health', (req, res) => res.json({ ok: true }));
 
 server.listen(PORT, () => console.log(`Proxmox Admin running on :${PORT}`));

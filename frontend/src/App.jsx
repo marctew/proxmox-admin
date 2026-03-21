@@ -1763,7 +1763,7 @@ function AdminSection({ title, icon, children }) {
   )
 }
 
-function AdminPage({ onBack, onLogout, hosts }) {
+function AdminPage({ onBack, onLogout, hosts, versionInfo }) {
   const [settings, setSettings] = useState(loadSettings)
   const [msg, setMsg] = useState(null) // { text, type }
 
@@ -1960,6 +1960,17 @@ function AdminPage({ onBack, onLogout, hosts }) {
       </header>
 
       <main className="px-admin-content" style={{ flex: 1, padding: '32px 24px', maxWidth: 860, margin: '0 auto', width: '100%' }}>
+
+        {versionInfo?.updateAvailable && (
+          <div style={{ marginBottom: 20, padding: '12px 16px', borderRadius: 'var(--radius)', background: 'var(--accent-dim)', border: '1px solid var(--accent)', display: 'flex', alignItems: 'center', gap: 10, fontSize: 'var(--fs-sm)' }}>
+            <span style={{ color: 'var(--accent)' }}>⬆</span>
+            <span>Update available — <strong>v{versionInfo.latest}</strong> (current: v{versionInfo.current})</span>
+            <a href="https://github.com/marctew/proxmox-admin/releases" target="_blank" rel="noreferrer"
+              style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 'var(--fs-xs)' }}>
+              View changelog →
+            </a>
+          </div>
+        )}
 
         {msg && (
           <div style={{ marginBottom: 20, padding: '10px 14px', borderRadius: 'var(--radius)', background: msg.type === 'error' ? 'var(--red-dim)' : 'var(--green-dim)', border: `1px solid ${msgColors[msg.type || 'success']}33`, color: msgColors[msg.type || 'success'], fontSize: 'var(--fs-sm)' }}>
@@ -2289,14 +2300,23 @@ function Router({ onLogout }) {
     api.get('/api/updates').then(res => { if (res.containers) setUpdateCache(res) })
   }, [])
 
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [versionInfo, setVersionInfo] = useState(null)
+
+  useEffect(() => {
+    api.get('/api/version').then(res => {
+      if (res.updateAvailable) { setUpdateAvailable(true); setVersionInfo(res) }
+    }).catch(() => {})
+  }, [])
+
   function goAdmin() { window.location.hash = '#/admin'; setPage('admin') }
   function goMain()  { window.location.hash = '#/';      setPage('main') }
 
-  if (page === 'admin') return <AdminPage onBack={goMain} onLogout={onLogout} hosts={hosts} />
-  return <App onLogout={onLogout} onAdmin={goAdmin} hosts={hosts} setHosts={setHosts} updateCache={updateCache} setUpdateCache={setUpdateCache} />
+  if (page === 'admin') return <AdminPage onBack={goMain} onLogout={onLogout} hosts={hosts} versionInfo={versionInfo} />
+  return <App onLogout={onLogout} onAdmin={goAdmin} hosts={hosts} setHosts={setHosts} updateCache={updateCache} setUpdateCache={setUpdateCache} updateAvailable={updateAvailable} versionInfo={versionInfo} />
 }
 
-function App({ onLogout, onAdmin, hosts, setHosts, updateCache, setUpdateCache }) {
+function App({ onLogout, onAdmin, hosts, setHosts, updateCache, setUpdateCache, updateAvailable, versionInfo }) {
   const [showAdd, setShowAdd] = useState(false)
   const [toast, setToast] = useState(null)
   const [filter, setFilter] = useState('all')
@@ -2420,7 +2440,17 @@ function App({ onLogout, onAdmin, hosts, setHosts, updateCache, setUpdateCache }
                 <PackageCheck size={14} />
               </Btn>
             )}
-            <Btn variant="ghost" size="sm" onClick={onAdmin} title="Admin"><Settings size={14} /></Btn>
+            <div style={{ position: 'relative', display: 'inline-flex' }}>
+              <Btn variant="ghost" size="sm" onClick={onAdmin} title="Admin"><Settings size={14} /></Btn>
+              {updateAvailable && (
+                <span title={`Update available: v${versionInfo?.latest}`} style={{
+                  position: 'absolute', top: -3, right: -3,
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: 'var(--accent)', border: '2px solid var(--bg1)',
+                  pointerEvents: 'none',
+                }} />
+              )}
+            </div>
             <Btn variant="ghost" onClick={onLogout} title="Sign out"><LogOut size={14} /></Btn>
           </div>
         </div>
