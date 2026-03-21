@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "hour": 2,
   "minute": 0,
   "concurrency": 1,
